@@ -166,6 +166,8 @@ PYTHONPATH=src python -m etf_rotation.cli backtest --preset v2
 
 ![回撤对比](output/drawdown_compare.png)
 
+> 上图由 `scripts/plot_drawdown_compare.py` 按第四轮修复后的引擎重绘(2026-09-29),三阶段 = 原文 / 单持仓+风控 / V3.1,图例数字与上方三档方案表同源。
+
 ## 重要假设(文章未披露,已在 config.py 标注)
 
 - `BIAS_N = 20`(乖离率均线窗口,常用 MA20)
