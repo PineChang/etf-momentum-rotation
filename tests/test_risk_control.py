@@ -205,11 +205,12 @@ class TestZhihuOptimizations:
 
 
 class TestPremiumRule:
-    """溢价率 7% 购买规则(2026-09-29 写入 V3 预设)。"""
+    """溢价率 7% 购买规则(2026-09-29 写入 V3.1 预设)。"""
 
-    def test_v3_preset_contains_premium_rule(self):
+    def test_v31_preset_contains_premium_rule(self):
         from etf_rotation.cli import PRESETS
-        assert PRESETS["v3"]["premium_max"] == 0.07
+        assert PRESETS["v3.1"]["premium_max"] == 0.07
+        assert "premium_max" not in PRESETS["v3"]   # V3 保持无溢价过滤原版
 
     def test_fetch_premium_is_pit_shifted(self, tmp_path, monkeypatch):
         """信号日收盘时当日净值未公布:premium 序列应整体 shift 1 天。"""

@@ -28,10 +28,11 @@ STATE_DIR = ROOT / "state"
 
 
 PRESETS: dict[str, dict] = {
-    # V3 = 项目验证过的推荐配置(README/audit-report);original = 忠实原文。
-    # premium_max=0.07(2026-09-29):场内价对单位净值溢价 >7% 时禁止买入——
-    # 513100 常年暂停申购,高溢价期买入存在溢价坍塌风险(见 audit-report 第八节)。
-    "v3": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25, premium_max=0.07),
+    # V3.1 = V3 + 溢价率过滤(当前推荐,2026-09-29 采纳,见 audit-report 8.1 节):
+    # 场内价对单位净值溢价 >7% 禁止买入——513100 常年暂停申购,高溢价期买入存在溢价坍塌风险。
+    # V3 = 项目验证过的原推荐配置(无溢价过滤);original = 忠实原文。
+    "v3.1": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25, premium_max=0.07),
+    "v3": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25),
     "v2": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0),
     "original": {},
 }
@@ -142,8 +143,8 @@ def main() -> None:
     p_sw.add_argument("--step", type=float, default=0.2)
 
     p_plan = sub.add_parser("plan", help="生成今日交易计划(盘前)")
-    p_plan.add_argument("--preset", choices=list(PRESETS), default="v3",
-                        help="参数预设:v3=项目验证的推荐配置(默认),original=忠实原文")
+    p_plan.add_argument("--preset", choices=list(PRESETS), default="v3.1",
+                        help="参数预设:v3.1=当前推荐(V3+溢价过滤,默认),original=忠实原文")
     _add_param_args(p_plan)
 
     args = parser.parse_args()
