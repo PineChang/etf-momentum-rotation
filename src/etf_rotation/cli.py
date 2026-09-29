@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 
-import pandas as pd
-
 from .backtest import run_backtest
 from .config import UNIVERSE, StrategyConfig
-from .data import attach_premium, fetch_universe
+from .data import attach_premium, fetch_universe, premium_status, update_premium_caches
 from .live import StateStore, make_plan
 from .metrics import format_metrics, perf_metrics
 
@@ -76,13 +75,32 @@ def cmd_fetch(args) -> None:
     data = fetch_universe(list(UNIVERSE))
     for s, df in data.items():
         print(f"{s} {UNIVERSE[s]}: {len(df)} bars, {df['date'].min().date()} → {df['date'].max().date()}")
+    # 溢价率数据(V3.1 购买规则依赖;不刷会在过期数据上静默漂移)
+    try:
+        update_premium_caches(list(UNIVERSE))
+        print("溢价数据(raw+nav)已刷新")
+    except Exception as e:
+        print(f"警告:溢价数据刷新失败({e}),V3.1 的 premium 规则将使用旧缓存", file=sys.stderr)
+
+
+def _with_premium(cfg: StrategyConfig, data: dict) -> dict:
+    """premium_max 生效时注入溢价列并做健康检查(缺失/过期即警告,绝不静默)。"""
+    if cfg.premium_max is None:
+        return data
+    data = attach_premium(data)
+    for sym, st in premium_status(list(data)).items():
+        if st["missing"]:
+            print(f"警告:{sym} 无溢价缓存,premium 规则对其静默失效!"
+                  f"请先运行 cli fetch(会同时刷新 raw+nav 缓存)。", file=sys.stderr)
+        elif st["stale"]:
+            print(f"警告:{sym} 溢价数据截至 {st['asof']},已过期;"
+                  f"建议先运行 cli fetch 刷新。", file=sys.stderr)
+    return data
 
 
 def cmd_backtest(args) -> None:
     cfg = _cfg_from_args(args)
-    data = fetch_universe(list(UNIVERSE))
-    if cfg.premium_max is not None:
-        data = attach_premium(data)
+    data = _with_premium(cfg, fetch_universe(list(UNIVERSE)))
     res = run_backtest(data, cfg)
     print(format_metrics(perf_metrics(res.equity, res.trades)))
     print(f"\n净值终值: {res.equity.iloc[-1]:.2f}")
@@ -109,17 +127,14 @@ def cmd_sweep(args) -> None:
 
 def cmd_plan(args) -> None:
     cfg = _cfg_from_args(args)
-    data = fetch_universe(list(UNIVERSE))
-    if cfg.premium_max is not None:
-        data = attach_premium(data)
+    data = _with_premium(cfg, fetch_universe(list(UNIVERSE)))
     store = StateStore(STATE_DIR)
     state = store.load_state(cfg.initial_cash)
     plan, new_state = make_plan(data, state, cfg)
     if cfg.premium_max is not None:
+        status = premium_status(list(data))
         plan["premium_check"] = {
-            s: (None if "premium" not in data[s] or pd.isna(data[s]["premium"].iloc[-1])
-                else round(float(data[s]["premium"].iloc[-1]), 4))
-            for s in data
+            s: {"premium": st["premium"], "asof": st["asof"]} for s, st in status.items()
         }
         plan["premium_rule"] = f"溢价 > {cfg.premium_max:.0%} 禁止买入(当日已自动排除)"
     store.save_state(new_state)      # 风控状态(锚点/禁买/连击)先落地,再谈成交

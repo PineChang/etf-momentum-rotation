@@ -114,7 +114,8 @@ def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     """给每只 ETF 的行情 df 注入 premium 列(该日最新已知溢价,缺失日 ffill)。
 
     premium_max 过滤(backtest._passes_risk_filters)只在行情 df 含 premium 列时生效;
-    无缓存数据的标的自动放行,不会因数据缺失而误杀。
+    无缓存数据的标的自动放行,不会因数据缺失而误杀——但这也意味着规则会**静默失效**,
+    调用方应配合 premium_status() 做缺失/过期警告(cli 已做)。
     """
     out = {}
     for sym, df in data.items():
@@ -126,3 +127,76 @@ def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         d["premium"] = d["premium"].ffill()
         out[sym] = d
     return out
+
+
+def premium_status(symbols: list[str], stale_days: int = 7) -> dict[str, dict]:
+    """溢价数据健康检查:{symbol: {premium, asof, missing, stale}}。
+
+    missing = 无 raw/nav 缓存(规则对该标的静默失效);
+    stale   = 最新溢价数据距今超 stale_days 天(溢价估计漂移,规则可靠性下降)。
+    """
+    today = pd.Timestamp.today().normalize()
+    out = {}
+    for sym in symbols:
+        prem = fetch_premium(sym)
+        if prem.empty:
+            out[sym] = {"premium": None, "asof": None, "missing": True, "stale": True}
+        else:
+            asof = prem.index[-1]
+            out[sym] = {
+                "premium": round(float(prem.iloc[-1]), 4),
+                "asof": str(asof.date()),
+                "missing": False,
+                "stale": (today - asof).days > stale_days,
+            }
+    return out
+
+
+def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None:
+    """全量刷新溢价数据源缓存:{sym}.raw.csv(腾讯未复权收盘)+ {sym}.nav.csv(东财单位净值)。
+
+    全量重拉而非增量:净值历史可能被数据源修订(尤其 QDII),全量最干净。
+    东财接口偶发限流,带重试与间隔。
+    """
+    import time
+
+    import akshare as ak
+    import requests
+
+    end = pd.Timestamp.today().strftime("%Y-%m-%d")
+    DATA_DIR.mkdir(exist_ok=True)
+    for sym in symbols:
+        # 未复权日线(腾讯,分页 640)
+        code = ("sh" if sym.startswith(("5", "6")) else "sz") + sym
+        rows, cur_end = [], end
+        for _ in range(20):  # 页数硬上限,防死循环
+            url = ("https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+                   f"?param={code},day,,{cur_end},640")
+            arr = requests.get(url, timeout=15).json()["data"][code]["day"]
+            if not arr:
+                break
+            rows = arr + rows
+            first = arr[0][0]
+            if first <= start:
+                break
+            cur_end = (pd.Timestamp(first) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            time.sleep(0.5)
+        recs = [(r[0], float(r[2])) for r in rows if start <= r[0] <= end]
+        raw = pd.DataFrame(recs, columns=["date", "close"]).drop_duplicates("date")
+        raw.sort_values("date").to_csv(DATA_DIR / f"{sym}.raw.csv", index=False)
+
+        # 单位净值(东财,带重试)
+        last_err = None
+        for attempt in range(4):
+            try:
+                nav = ak.fund_etf_fund_info_em(fund=sym, start_date=start.replace("-", ""),
+                                               end_date=end.replace("-", ""))
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(3 * (attempt + 1))
+        else:
+            raise RuntimeError(f"{sym} 净值抓取失败:{last_err}")
+        nav = nav.rename(columns={"净值日期": "date", "单位净值": "nav"})[["date", "nav"]]
+        nav.to_csv(DATA_DIR / f"{sym}.nav.csv", index=False)
+        time.sleep(2)

@@ -235,3 +235,19 @@ class TestPremiumRule:
         df = synth_ohlc(geom(20, 1.01, 30))
         out = data_mod.attach_premium({"A": df})
         assert "premium" not in out["A"].columns
+
+    def test_premium_status_missing_and_stale(self, tmp_path, monkeypatch):
+        """premium_status:无缓存 missing=True;旧数据 stale=True。"""
+        from etf_rotation import data as data_mod
+        monkeypatch.setattr(data_mod, "DATA_DIR", tmp_path)
+        st = data_mod.premium_status(["NOPE"])
+        assert st["NOPE"]["missing"] is True and st["NOPE"]["stale"] is True
+
+        raw = pd.DataFrame({"date": pd.to_datetime(["2020-01-01", "2020-01-02"]), "close": [1.0, 1.0]})
+        nav = pd.DataFrame({"date": pd.to_datetime(["2020-01-01", "2020-01-02"]), "nav": [1.0, 1.0]})
+        raw.to_csv(tmp_path / "OLD.raw.csv", index=False)
+        nav.to_csv(tmp_path / "OLD.nav.csv", index=False)
+        st = data_mod.premium_status(["OLD"])
+        assert st["OLD"]["missing"] is False
+        assert st["OLD"]["stale"] is True          # 2020 年的数据必然过期
+        assert st["OLD"]["asof"] == "2020-01-02"
