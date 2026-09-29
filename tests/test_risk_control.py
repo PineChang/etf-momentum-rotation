@@ -223,6 +223,53 @@ class TestZhihuOptimizations:
         assert res.holdings.iloc[-1] == "B+C"           # 两个槽位都被合格标的填满
         assert res.trades[res.trades["symbol"] == "A"].empty   # 被筛掉的标的从未买入
 
+    def test_premium_does_not_exit_existing_holding(self):
+        """第五轮口径:溢价门槛是**开仓前安检**,已持有的标的溢价爆表不因此被卖出
+        (持有期离场归移动止损/止盈/评分轮动管)。"""
+        n = 45
+        data = {"A": synth_ohlc(geom(20, 1.010, n)), "B": synth_ohlc(geom(20, 1.006, n))}
+        data["A"]["premium"] = 0.0
+        data["B"]["premium"] = 0.0
+        data["A"].loc[data["A"].index >= 30, "premium"] = 0.50   # 后半段 A 溢价爆表
+
+        res = run_backtest(data, StrategyConfig(**BASE, n_hold=1, premium_max=0.01))
+        buys_a = res.trades[(res.trades["symbol"] == "A") & (res.trades["action"] == "BUY")]
+        sells_a = res.trades[(res.trades["symbol"] == "A") & (res.trades["action"] == "SELL")]
+        assert not buys_a.empty                  # 溢价正常时买入
+        assert sells_a.empty                     # 溢价爆表后不被强制卖出
+        assert res.holdings.iloc[-1] == "A"
+
+    def test_blocked_top_pick_does_not_trigger_phantom_rotation(self):
+        """回归(第五轮):评分第一被入场门槛拦截时,不能把在持标的换出给它腾位置
+        (必须先验票再选股;先换血后验票会出现 A 进不来、C 也回不来的空槽位)。"""
+        n = 45
+        data = {"A": synth_ohlc(geom(20, 1.010, n)),
+                "B": synth_ohlc(geom(20, 1.006, n)),
+                "C": synth_ohlc(geom(20, 1.002, n))}
+        data["A"]["premium"] = 0.50              # 全程爆表,始终不可买入
+        for s in ("B", "C"):
+            data[s]["premium"] = 0.0
+
+        res = run_backtest(data, StrategyConfig(**BASE, n_hold=2, premium_max=0.01))
+        assert len(res.trades) == 2                      # 只有最初两笔建仓 BUY
+        assert (res.trades["action"] == "BUY").all()     # 之后全程无调仓
+        assert res.holdings.iloc[-1] == "B+C"
+
+    def test_all_filtered_exits_to_cash_while_holding(self):
+        """回归(第五轮):全池被 regime 过滤(min_momentum)筛掉时,持仓也必须离场
+        (空仓观望)——不能撞上 select_targets 的空序列守卫变成继续持有死扛。"""
+        up = geom(10, 1.01, 40)                  # 涨段:A 动量为正,建仓
+        down = geom(up[-1] * 0.99, 0.99, 30)     # 跌段:全池动量转负
+        data = {"A": synth_ohlc(up + down),
+                "B": synth_ohlc([10.0] * 40 + geom(10.0, 0.99, 30)[1:])}
+        res = run_backtest(data, StrategyConfig(**BASE, min_momentum=0.0))
+        sells = res.trades[res.trades["action"] == "SELL"]
+        assert not sells.empty                   # 全池无趋势时必须离场
+        assert pd.isna(res.holdings.iloc[-1])    # 期末空仓
+        # 离场后净值走平(空仓观望,不再随下跌段亏损)
+        eq = res.equity
+        assert eq.iloc[-1] == pytest.approx(eq.loc[sells.iloc[0]["date"]:].max(), rel=1e-9)
+
 
 class TestPremiumRule:
     """溢价率 7% 购买规则(2026-09-29 写入 V3.1 预设)。"""

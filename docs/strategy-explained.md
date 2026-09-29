@@ -6,7 +6,7 @@
 >
 > ⚠️ **本文成文于 2026-09-28,数字对应修复前的引擎;而 V2 之后又有了 V3(加止盈)与
 > V3.1(加溢价过滤,当前推荐)。** 本文没有覆盖止盈与溢价规则,§5 的对比表也还是当时的
-> V2 配置。**当前官方数字与推荐配置见 `README.md` 与 `docs/audit-report.md` §九。**
+> V2 配置。**当前官方数字与推荐配置见 `README.md` 与 `docs/audit-report.md` §十。**
 > 本文保留的价值在于它的**原理解释**(三因子怎么算、为什么 Z-Score、风控为什么这样设计)。
 >
 > 代码仓库:`etf-momentum-rotation/` | 验证报告:`docs/validation.md` | 开发过程:`docs/development.md`
@@ -316,13 +316,13 @@ pip install -r requirements.txt
 # V1 原文策略
 PYTHONPATH=src python -m etf_rotation.cli backtest
 
-# 当前推荐配置 V3.1(双持仓+移动止损+动量过滤+止盈+溢价过滤)
+# 当前推荐配置 V3.1(双持仓+移动止损+动量过滤+止盈+溢价入场门槛)
 PYTHONPATH=src python -m etf_rotation.cli backtest --preset v3.1
 
 # 生成今日交易计划(盘前,默认预设即 v3.1)
 PYTHONPATH=src python -m etf_rotation.cli plan
 
-# 单元+集成测试(92 个)
+# 单元+集成测试(95 个)
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 

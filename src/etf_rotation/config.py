@@ -32,8 +32,9 @@ class StrategyConfig:
     commission: float = 0.0001      # ETF 佣金约万1,双边收取,无印花税
 
     # ---- 风控扩展(本项目改良,文章没有;默认 None = 关闭 = 忠实原文) ----
-    min_momentum: float | None = None   # 绝对动量过滤:候选标的近 slope_n 天收益 ≤ 该值则空仓
-    ma_filter_n: int | None = None      # 均线过滤:候选标的收盘价低于 MA(n) 则空仓
+    # regime 过滤(离场语义:不合格的在持标的离场,全池不合格则空仓观望)
+    min_momentum: float | None = None   # 绝对动量过滤:候选标的近 slope_n 天收益 ≤ 该值则离场/不建仓
+    ma_filter_n: int | None = None      # 均线过滤:候选标的收盘价低于 MA(n) 则离场/不建仓
     stop_loss: float | None = None      # 止损:持仓浮亏超过该比例(如 0.08)强制清仓
     stop_cooldown_days: int = 10        # 止损后同标的禁买期(交易日),防止损-追高循环
     trailing_stop: float | None = None  # 移动止损:收盘价自持仓期间最高点回落超该比例即离场(保护浮盈)
@@ -48,8 +49,9 @@ class StrategyConfig:
     lb_ratio_cap: float = 0.9           #    波动率比例封顶
     vol_short_n: int = 10               #    短窗 ATR 天数
     vol_long_n: int = 60                #    长窗 ATR 天数
+    # 入场门槛(只拦新开仓,不踢已有持仓;持有期离场归止损/止盈/轮动)
     drop_filter: bool = False           # ③ 急跌过滤:近 5 日出现单日-5%或连跌且累计-5%的标的不买
-    premium_max: float | None = None    # ② 溢价率上限:未复权收盘/单位净值 - 1 超过该值不买
+    premium_max: float | None = None    # ② 溢价率上限:开仓前安检,未复权收盘/单位净值 - 1 超过该值不买
                                         #    (需行情 df 带 premium 列,实验脚本注入;None = 关闭)
 
     # warmup 所需最少历史 bar 数

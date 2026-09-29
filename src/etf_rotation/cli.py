@@ -27,8 +27,9 @@ STATE_DIR = ROOT / "state"
 
 
 PRESETS: dict[str, dict] = {
-    # V3.1 = V3 + 溢价率过滤(当前推荐,2026-09-29 采纳,见 audit-report 8.1 节):
-    # 场内价对单位净值溢价 >7% 禁止买入——513100 常年暂停申购,高溢价期买入存在溢价坍塌风险。
+    # V3.1 = V3 + 溢价率入场门槛(当前推荐,2026-09-29 采纳,见 audit-report 8.1/十节):
+    # 开仓前安检——场内价对单位净值溢价 >7% 不开新仓(只拦新买,不踢已有持仓);
+    # 513100 常年暂停申购,高溢价期买入存在溢价坍塌风险。
     # V3 = 项目验证过的原推荐配置(无溢价过滤);original = 忠实原文。
     "v3.1": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25, premium_max=0.07),
     "v3": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25),
@@ -68,7 +69,7 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--take-profit", type=float, help="固定止盈:对成本价浮盈比例,如 0.25")
     p.add_argument("--confirm-days", type=int, help="入场确认天数:空仓时须连续N天评分第一才建仓")
     p.add_argument("--n-hold", type=int, help="持仓只数:1=原文全仓单标的,2=双标的等权分散")
-    p.add_argument("--premium-max", type=float, help="溢价率过滤:场内价对单位净值溢价超过该值禁止买入(如 0.07);仅 v3.1 预设默认开启")
+    p.add_argument("--premium-max", type=float, help="溢价率入场门槛:场内价对单位净值溢价超过该值不开新仓(如 0.07),不踢已有持仓;仅 v3.1 预设默认开启")
 
 
 def cmd_fetch(args) -> None:
@@ -139,7 +140,7 @@ def cmd_plan(args) -> None:
             s: {"premium": st["premium"], "asof": st["asof"],
                 "nav_lag": st["nav_lag"], "stale": st["stale"]} for s, st in status.items()
         }
-        plan["premium_rule"] = f"溢价 > {cfg.premium_max:.0%} 禁止买入(当日已自动排除)"
+        plan["premium_rule"] = f"溢价 > {cfg.premium_max:.0%} 不开新仓(入场安检,已持有不受影响;当日计划已自动排除)"
     store.save_state(new_state)      # 风控状态(锚点/禁买/连击)先落地,再谈成交
     store.save_params(cfg)
     store.append_log({"type": "plan", **plan})
@@ -155,7 +156,7 @@ def main() -> None:
     p_bt = sub.add_parser("backtest", help="运行回测")
     p_bt.add_argument("--preset", choices=list(PRESETS), default="original",
                       help="参数预设:original=忠实原文(默认,年化42%%/回撤-32%%);"
-                           "v3.1=当前推荐(溢价过滤,年化30%%/回撤-12%%);v3/v2=历史版本")
+                           "v3.1=当前推荐(溢价入场门槛,年化30%%/回撤-13%%);v3/v2=历史版本")
     _add_param_args(p_bt)
 
     p_sw = sub.add_parser("sweep", help="参数遍历")

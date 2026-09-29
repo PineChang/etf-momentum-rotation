@@ -6,14 +6,17 @@
 - 全程复利:卖出回款(含浮动盈亏)全额再投,对应文章
   “每次调仓后把之前持仓盈亏相加,实现复利效应”。
 
-风控扩展(默认关闭/默认 1,即忠实原文,见 StrategyConfig):
-- n_hold:持仓只数,1=原文全仓单标的;2=双标的等权分散(建仓时等权,
-  持仓期间不 rebalance,权重随涨跌漂移);
-- min_momentum:绝对动量过滤(原始收益,非 Z-Score),全池无趋势时空仓观望;
-- ma_filter_n:候选标的跌破自身均线时不建仓/离场;
+风控扩展(默认关闭/默认 1,即忠实原文,见 StrategyConfig)。过滤分两类语义:
+
+- regime 过滤(离场语义):min_momentum(绝对动量,原始收益非 Z-Score)、
+  ma_filter_n(跌破均线)。不合格的在持标的离场;全池不合格 = 全池无趋势 → 空仓观望;
+- 入场门槛(只拦新开仓,不影响已持有):premium_max(溢价安检,防溢价买入后坍塌套牢)、
+  drop_filter(急跌防接飞刀)。已持有标的溢价爆表不因此卖出——持有期离场归止损/止盈/轮动管;
 - stop_loss:固定止损(对成本价);trailing_stop:移动止损(对持仓期间最高价,保护浮盈);
-  触发后进入 stop_cooldown_days 禁买期;
-- confirm_days:全空仓状态下,标的须连续 N 天评分第一才允许建仓(防震荡期假信号)。
+  触发后进入 stop_cooldown_days 禁买期;take_profit:固定止盈(对成本价);
+- confirm_days:全空仓状态下,标的须连续 N 天评分第一才允许建仓(防震荡期假信号);
+- n_hold:持仓只数,1=原文全仓单标的;2=双标的等权分散(建仓时等权,
+  持仓期间不 rebalance,权重随涨跌漂移)。
 """
 
 from __future__ import annotations
@@ -58,9 +61,9 @@ def _align(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     return {s: df[df["date"].isin(common)].reset_index(drop=True) for s, df in data.items()}
 
 
-def _passes_risk_filters(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg: StrategyConfig) -> bool:
-    """绝对动量过滤 + 均线过滤(原始收益,非 Z-Score——横截面标准化后
-    总有一个相对最高的标的,无法表达"绝对无趋势")。"""
+def _passes_regime_filters(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg: StrategyConfig) -> bool:
+    """regime 过滤(离场语义):绝对动量 + 均线(原始收益,非 Z-Score——横截面标准化后
+    总有一个相对最高的标的,无法表达"绝对无趋势")。不合格的在持标的离场。"""
     close = data[symbol]["close"].iloc[: t + 1]
     if cfg.min_momentum is not None and len(close) >= cfg.slope_n:
         if close.iloc[-1] / close.iloc[-cfg.slope_n] - 1 <= cfg.min_momentum:
@@ -68,7 +71,19 @@ def _passes_risk_filters(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg
     if cfg.ma_filter_n is not None and len(close) >= cfg.ma_filter_n:
         if close.iloc[-1] < close.rolling(cfg.ma_filter_n).mean().iloc[-1]:
             return False
-    # 知乎改进③:近 5 日出现单日跌超 5%,或连跌且累计跌超 5% 的标的不买(防接飞刀)
+    return True
+
+
+def _passes_entry_gates(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg: StrategyConfig) -> bool:
+    """入场门槛(只拦新开仓,不影响已持有标的)。
+
+    - 知乎改进③:近 5 日出现单日跌超 5%,或连跌且累计跌超 5% 的标的不买(防接飞刀);
+    - 知乎改进②:场内价对单位净值溢价过高(资金拥挤)不买,防溢价买入后坍塌套牢。
+      premium 列按 PIT 注入(信号日取前一交易日已公布的净值,见 data.fetch_premium);
+      行情 df 无该列时视为无数据放行。
+    已持有的标的即使触发上述条件也不因此卖出——持有期离场由止损/止盈/评分轮动负责。
+    """
+    close = data[symbol]["close"].iloc[: t + 1]
     if cfg.drop_filter and len(close) >= 5:
         p = close.iloc[-5:].to_numpy(dtype=float)
         con1 = min(p[-1] / p[-2], p[-2] / p[-3], p[-3] / p[-4]) < 0.95
@@ -76,13 +91,17 @@ def _passes_risk_filters(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg
         con3 = (p[-2] < p[-3] < p[-4] < p[-5]) and (p[-2] / p[-5] < 0.95)
         if con1 or con2 or con3:
             return False
-    # 知乎改进②:场内价对单位净值溢价过高(资金拥挤)不买。premium 列由
-    # 实验脚本按 未复权收盘/单位净值-1 预计算注入;行情 df 无该列时视为无数据放行。
     if cfg.premium_max is not None and "premium" in data[symbol]:
         prem = data[symbol]["premium"].iloc[t]
         if pd.notna(prem) and prem > cfg.premium_max:
             return False
     return True
+
+
+def _passes_risk_filters(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg: StrategyConfig) -> bool:
+    """regime 过滤 ∧ 入场门槛(两类语义的合取,供需要"全量合格"判断的调用方使用)。"""
+    return (_passes_regime_filters(symbol, data, t, cfg)
+            and _passes_entry_gates(symbol, data, t, cfg))
 
 
 def compute_target_set(
@@ -122,13 +141,25 @@ def compute_target_set(
 
     banned = [s for s, ts in stopped.items() if t - ts < cfg.stop_cooldown_days]
     candidates = scores.drop(index=banned, errors="ignore")
-    # 风控筛选是**候选池的过滤器**,必须在选股之前:被剔掉的名额应由下一个合格候选
-    # 递补。若放在 select_targets 之后,被剔标的只是让槽位空着(第 3 名不递补)——
-    # V3.1 的溢价规则会把常居第一的 513100 反复剔掉,实测 32.7% 的持仓日只持 1 只,
-    # 与 n_hold 的分散意图相悖。
-    # 在持标的若不在合格池中仍会被剔除(= 离场),与 "该标的被筛掉则不持有" 的语义一致。
-    eligible = candidates.loc[[s for s in candidates.index if _passes_risk_filters(s, data, t, cfg)]]
-    target_set = select_targets(eligible, set(positions), cfg.rebalance_threshold, cfg.n_hold)
+    # regime 过滤是**候选池的过滤器**(离场语义),必须在选股之前:被剔掉的名额应由
+    # 下一个合格候选递补;若放在 select_targets 之后,被剔标的只是让槽位空着(第 3 名
+    # 不递补),与 n_hold 的分散意图相悖(第四轮修复,当时由溢价规则触发——实测 32.7%
+    # 的持仓日只持 1 只;第五轮起溢价改为入场门槛,递补由下方 pool 验票继承)。
+    # 全池无合格标的 → 目标空仓,无论当前是否持仓(第五轮修复:此前撞上
+    # select_targets 的空序列守卫,变成"全池无趋势时继续持有死扛",与 docstring
+    # 的"空仓观望"及旧引擎行为相悖;同一标的的风控裁决被其他标的状态劫持)。
+    eligible = candidates.loc[[s for s in candidates.index if _passes_regime_filters(s, data, t, cfg)]]
+    if eligible.empty:
+        target_set: set[str] = set()
+    else:
+        # 入场门槛(溢价/急跌)只拦**新开仓**,不踢已有持仓:未持有的超标标的从选股池
+        # 剔除,select_targets 的名额递补/阈值换血自然跳过它;已持有的留在池内——
+        # 持有期离场归止损/止盈/评分轮动管,溢价爆表不构成卖出理由(第五轮口径)。
+        # 必须先验票再选股:若先换血后验票,会出现"为给被拦的 A 腾位置把 C 换出,
+        # A 进不来、C 也回不来"的空槽位。
+        pool = eligible.loc[[s for s in eligible.index
+                             if s in positions or _passes_entry_gates(s, data, t, cfg)]]
+        target_set = select_targets(pool, set(positions), cfg.rebalance_threshold, cfg.n_hold)
 
     # 入场确认:全空仓时,第一名须连续 confirm_days 天居首才允许建仓
     top: str | None = None
