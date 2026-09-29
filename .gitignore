@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# 行情数据缓存(可由 cli fetch / scripts/eval_zhihu.py 重新抓取)
+data/
+
+# 实盘状态(个人持仓/现金/交易日志,不入库)
+state/
+
+# 系统文件
+.DS_Store

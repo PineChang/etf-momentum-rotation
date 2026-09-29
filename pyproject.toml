@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etf-momentum-rotation"
+version = "0.1.0"
+description = "ETF 三因子动量轮动策略(乖离/斜率/效率动量 + Z-Score 加权 + 调仓阈值)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "akshare>=1.16",
+    "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+etf-rotation = "etf_rotation.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
