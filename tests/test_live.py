@@ -10,6 +10,7 @@ from etf_rotation.live import (
     Holding,
     LiveState,
     StateStore,
+    check_fillable_at_open,
     execute_plan,
     make_plan,
 )
@@ -257,3 +258,78 @@ class TestStateStore:
         store.append_log({"action": "SELL", "symbol": "UP"})
         lines = (tmp_path / "trade_log.jsonl").read_text().strip().split("\n")
         assert len(lines) == 2
+
+
+class TestCheckFillableAtOpen:
+    """限价单开盘成交判定(cli execute 的整批执行/整批放弃依据)。"""
+
+    PLAN = {"orders": [
+        {"action": "SELL", "symbol": "A", "limit_price": 9.90},   # 昨收 10 × 0.99
+        {"action": "BUY", "symbol": "B", "limit_price": 10.10},   # 昨收 10 × 1.01
+    ]}
+
+    def test_all_fill_when_open_within_limits(self):
+        assert check_fillable_at_open(self.PLAN, {"A": 10.0, "B": 10.0}) == []
+
+    def test_gap_up_blocks_buy(self):
+        problems = check_fillable_at_open(self.PLAN, {"A": 10.0, "B": 10.20})
+        assert len(problems) == 1 and "B" in problems[0]
+
+    def test_gap_down_blocks_sell(self):
+        problems = check_fillable_at_open(self.PLAN, {"A": 9.80, "B": 10.0})
+        assert len(problems) == 1 and "A" in problems[0]
+
+    def test_missing_open_price_is_a_problem(self):
+        problems = check_fillable_at_open(self.PLAN, {"A": 10.0})
+        assert len(problems) == 1 and "B" in problems[0]
+
+
+class TestPlanExecutionTracking:
+    """execute 的幂等保护:计划是否已执行,按 plan_date + data_asof 匹配。"""
+
+    PLAN = {"plan_date": "2026-09-29", "data_asof": "2026-09-28", "orders": []}
+
+    def test_latest_plan_and_executed_roundtrip(self, tmp_path):
+        store = StateStore(tmp_path)
+        assert store.latest_plan() is None
+        store.append_log({"type": "plan", **self.PLAN, "orders": [{"action": "BUY"}]})
+        plan = store.latest_plan()
+        assert plan["plan_date"] == "2026-09-29"
+        assert store.plan_executed(plan) is False
+        store.append_log({"type": "fill", "plan_date": "2026-09-29",
+                          "data_asof": "2026-09-28", "fills": []})
+        assert store.plan_executed(plan) is True
+
+    def test_fill_of_older_plan_does_not_mark_newer(self, tmp_path):
+        store = StateStore(tmp_path)
+        store.append_log({"type": "fill", "plan_date": "2026-09-26",
+                          "data_asof": "2026-09-25", "fills": []})
+        assert store.plan_executed(self.PLAN) is False
+
+
+class TestGmAdapterMapping:
+    """掘金适配器的纯映射逻辑(不连掘金,gm 库惰性导入所以可加载)。"""
+
+    @staticmethod
+    def _load():
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "gm_paper", Path(__file__).resolve().parents[1] / "scripts" / "gm_paper.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_symbol_prefix_and_order_shape(self):
+        mod = self._load()
+        plan = {"orders": [
+            {"action": "SELL", "symbol": "518880", "limit_price": 8.5, "est_budget": 100.0},
+            {"action": "BUY", "symbol": "513100", "limit_price": 2.4, "est_budget": 50000.0},
+            {"action": "BUY", "symbol": "159949", "limit_price": 1.5, "est_budget": 50000.0},
+        ]}
+        orders = mod.plan_to_gm_orders(plan)
+        assert orders[0] == {"action": "close_all", "symbol": "SHSE.518880", "reason": ""}
+        assert orders[1]["action"] == "buy_value" and orders[1]["symbol"] == "SHSE.513100"
+        assert orders[1]["value"] == 50000.0 and orders[1]["price"] == 2.4
+        assert orders[2]["symbol"] == "SZSE.159949"     # 深市前缀
+        assert [o["action"] for o in orders] == ["close_all", "buy_value", "buy_value"]  # 先卖后买

@@ -4,7 +4,8 @@
   python -m etf_rotation.cli fetch                     # 下载/更新数据
   python -m etf_rotation.cli backtest                  # 全量回测 + 图表 + 交易明细
   python -m etf_rotation.cli sweep [--step 0.2]        # 参数遍历
-  python -m etf_rotation.cli plan                      # 生成今日交易计划(盘前)
+  python -m etf_rotation.cli plan                      # 生成今日交易计划(盘前/前一晚)
+  python -m etf_rotation.cli execute                   # 开盘按真实开盘价成交最近一份计划(虚盘)
 """
 
 from __future__ import annotations
@@ -15,10 +16,12 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
+
 from .backtest import run_backtest
 from .config import UNIVERSE, StrategyConfig
-from .data import attach_premium, fetch_universe, premium_status, update_premium_caches
-from .live import StateStore, make_plan
+from .data import attach_premium, fetch_today_opens, fetch_universe, premium_status, update_premium_caches
+from .live import StateStore, check_fillable_at_open, execute_plan, make_plan
 from .metrics import format_metrics, perf_metrics
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -147,6 +150,54 @@ def cmd_plan(args) -> None:
     print(json.dumps(plan, ensure_ascii=False, indent=2, default=str))
 
 
+def cmd_execute(args) -> None:
+    """开盘执行最近一份计划(对应文章 9:30 实际交易;虚盘/实盘共用)。
+
+    拉取今日开盘价(腾讯),校验限价单可成交后调 execute_plan 落账。
+    整批执行或整批放弃:任一限价单开盘未成交则本次不动,稍后重跑即可
+    (限价单盘中仍可能成交)。同一份计划拒绝重复执行(execute_plan 非幂等)。
+    """
+    store = StateStore(STATE_DIR)
+    plan = store.latest_plan()
+    if plan is None:
+        print("没有待执行的计划:请先运行 cli plan")
+        return
+    if not plan.get("orders"):
+        print(f"计划 {plan['plan_date']}(信号数据 {plan['data_asof']})无订单,空仓日无需执行")
+        return
+    if store.plan_executed(plan):
+        print(f"计划 {plan['plan_date']} 已执行过(成交记录见 trade_log.jsonl),拒绝重复执行")
+        return
+    age = (pd.Timestamp.today() - pd.Timestamp(plan["plan_date"])).days
+    if age > 4:
+        print(f"计划生成于 {plan['plan_date']},已过 {age} 天,信号可能过时——请先 cli plan 重新生成")
+        return
+    if store.params_file.exists():
+        cfg = StrategyConfig(**json.loads(store.params_file.read_text()))
+    else:                                   # 兼容:从未跑过 plan 直接 execute 的情况
+        cfg = StrategyConfig(**PRESETS["v3.1"])
+
+    open_prices = fetch_today_opens(list(UNIVERSE))
+    problems = check_fillable_at_open(plan, open_prices)
+    if problems:
+        print("以下限价单在开盘价未成交,本次整批不执行(可稍候重跑):")
+        for p in problems:
+            print(" -", p)
+        return
+
+    state = store.load_state(cfg.initial_cash)
+    new_state = execute_plan(plan, state, open_prices, cfg)
+    store.save_state(new_state)
+    fills = [{**o, "fill_price": open_prices[o["symbol"]]} for o in plan["orders"]]
+    store.append_log({"type": "fill", "plan_date": plan["plan_date"],
+                      "data_asof": plan["data_asof"], "fills": fills})
+    print(f"已按今日开盘价成交 {len(fills)} 笔:")
+    for f in fills:
+        print(f"  {f['action']} {f['symbol']} @ {f['fill_price']}  (限价 {f['limit_price']})")
+    print(f"现金 {new_state.cash:.2f} | 持仓 {sorted(new_state.holdings) or '空仓'} "
+          f"| 累计已实现盈亏 {new_state.realized_pnl:.2f}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="etf-rotation", description="ETF 三因子动量轮动策略")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -167,8 +218,11 @@ def main() -> None:
                         help="参数预设:v3.1=当前推荐(V3+溢价过滤,默认),original=忠实原文")
     _add_param_args(p_plan)
 
+    sub.add_parser("execute", help="开盘按真实开盘价成交最近一份计划(虚盘)")
+
     args = parser.parse_args()
-    {"fetch": cmd_fetch, "backtest": cmd_backtest, "sweep": cmd_sweep, "plan": cmd_plan}[args.command](args)
+    {"fetch": cmd_fetch, "backtest": cmd_backtest, "sweep": cmd_sweep,
+     "plan": cmd_plan, "execute": cmd_execute}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -322,7 +322,7 @@ PYTHONPATH=src python -m etf_rotation.cli backtest --preset v3.1
 # 生成今日交易计划(盘前,默认预设即 v3.1)
 PYTHONPATH=src python -m etf_rotation.cli plan
 
-# 单元+集成测试(95 个)
+# 单元+集成测试(102 个)
 PYTHONPATH=src python -m pytest tests/ -q
 ```
 

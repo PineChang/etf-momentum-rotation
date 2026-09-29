@@ -94,6 +94,28 @@ class StateStore:
     def save_params(self, cfg: StrategyConfig) -> None:
         self.params_file.write_text(json.dumps(asdict(cfg), ensure_ascii=False, indent=2))
 
+    def latest_plan(self) -> dict | None:
+        """最近一份盘前计划(trade_log 中最后一条 type=plan 记录),无则 None。"""
+        if not self.log_file.exists():
+            return None
+        for line in reversed(self.log_file.read_text().splitlines()):
+            rec = json.loads(line)
+            if rec.get("type") == "plan":
+                return rec
+        return None
+
+    def plan_executed(self, plan: dict) -> bool:
+        """该计划是否已有成交记录(按 plan_date + data_asof 匹配,防重复执行)。"""
+        if not self.log_file.exists():
+            return False
+        for line in self.log_file.read_text().splitlines():
+            rec = json.loads(line)
+            if (rec.get("type") == "fill"
+                    and rec.get("plan_date") == plan.get("plan_date")
+                    and rec.get("data_asof") == plan.get("data_asof")):
+                return True
+        return False
+
 
 def make_plan(
     data: dict[str, pd.DataFrame],
@@ -178,6 +200,27 @@ def make_plan(
         "orders": orders,
     }
     return plan, new_state
+
+
+def check_fillable_at_open(plan: dict, open_prices: dict[str, float]) -> list[str]:
+    """限价单在开盘价能否成交:买入需 open ≤ 限价,卖出需 open ≥ 限价。
+
+    返回未成交原因列表(空列表 = 全部可成交)。调用方应采用**整批执行或整批放弃**:
+    限价单开盘没成交不代表日内不成交,稍后重跑即可;部分执行会让买单用到
+    卖单尚未释放的现金,污染仓位结构。
+    """
+    problems = []
+    for o in plan["orders"]:
+        sym = o["symbol"]
+        open_px = open_prices.get(sym)
+        if open_px is None or open_px <= 0:
+            problems.append(f"{sym}: 无今日开盘价(行情未开始或数据源缺失)")
+            continue
+        if o["action"] == "BUY" and open_px > o["limit_price"]:
+            problems.append(f"{sym}: 开盘 {open_px} > 买入限价 {o['limit_price']}(高开超 1%,暂未成交)")
+        elif o["action"] == "SELL" and open_px < o["limit_price"]:
+            problems.append(f"{sym}: 开盘 {open_px} < 卖出限价 {o['limit_price']}(低开超 1%,暂未成交)")
+    return problems
 
 
 def execute_plan(

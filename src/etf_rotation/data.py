@@ -168,6 +168,30 @@ def premium_status(symbols: list[str], max_lag_days: int = 1,
     return out
 
 
+def fetch_today_opens(symbols: list[str]) -> dict[str, float]:
+    """腾讯当日日线 bar 的开盘价(9:30 集合竞价后可用),供 cli execute 成交虚盘计划。
+
+    数据源与溢价 raw 缓存一致(腾讯)。今日 bar 尚未生成(盘前/非交易日)时抛错。
+    """
+    import time
+
+    import requests
+
+    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    out = {}
+    for sym in symbols:
+        code = ("sh" if sym.startswith(("5", "6")) else "sz") + sym
+        r = requests.get("https://web.ifzq.gtimg.cn/appstock/app/kline/kline",
+                         params={"param": f"{code},day,,,2,"}, timeout=15)
+        day = r.json()["data"][code]["day"]
+        if not day or day[-1][0] != today:
+            latest = day[-1][0] if day else "无数据"
+            raise RuntimeError(f"{sym} 今日 bar 尚未生成(最新 {latest})——开盘后再执行")
+        out[sym] = float(day[-1][1])     # [date, open, close, high, low, volume]
+        time.sleep(0.3)
+    return out
+
+
 def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None:
     """全量刷新溢价数据源缓存:{sym}.raw.csv(腾讯未复权收盘)+ {sym}.nav.csv(东财单位净值)。
 
