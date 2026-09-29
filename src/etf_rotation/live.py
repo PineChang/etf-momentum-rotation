@@ -123,20 +123,27 @@ def make_plan(
         if ts in set(calendar):
             stopped_idx[sym] = int(calendar[calendar == ts].index[0])
 
+    # compute_target_set 会就地推进 peaks(持仓期最高收盘价)与 top_streak(评分连击)。
+    # 这两个入参必须是**随后用来落盘的那一份**,否则推进结果被丢弃——
+    # 实盘移动止损会退化为"锚定开仓价的固定止损",confirm_days 也永不生效。
+    peaks = {s: h.peak for s, h in state.holdings.items()}
+    streak = dict(state.top_streak)
     target, scores = compute_target_set(
         data, t, cfg,
         positions={s: h.shares for s, h in state.holdings.items()},
         entries={s: h.cost for s, h in state.holdings.items()},
-        peaks={s: h.peak for s, h in state.holdings.items()},
+        peaks=peaks,
         stopped=stopped_idx,
-        top_streak=dict(state.top_streak),
+        top_streak=streak,
     )
 
     # 推进后的风控状态(份额/现金不变,成交由 execute_plan 处理)
     new_state = LiveState(
-        cash=state.cash, holdings=dict(state.holdings), realized_pnl=state.realized_pnl,
+        cash=state.cash,
+        holdings={s: replace(h, peak=peaks.get(s, h.peak)) for s, h in state.holdings.items()},
+        realized_pnl=state.realized_pnl,
         stopped={s: str(calendar.iloc[i].date()) for s, i in stopped_idx.items()},
-        top_streak=dict(state.top_streak),
+        top_streak=streak,
     )
 
     closes = {s: float(data[s]["close"].iloc[t]) for s in symbols}
@@ -184,6 +191,9 @@ def execute_plan(
     fill_prices: {symbol: 实际成交价} —— 对接实盘时由券商回报提供,
     回测/模拟时可用开盘价;未成交的持仓按计划参考价估值。
     返回成交后的 LiveState(先卖后买,槽位等权,复利全额再投)。
+
+    本函数**不幂等**:同一份 plan 只能执行一次,重放会二次买入。卖出不在持仓中的
+    标的时直接抛错(而不是静默跳过),以免重放把账户状态改坏。
     """
     if not plan["orders"]:
         return state
@@ -196,6 +206,11 @@ def execute_plan(
     for o in plan["orders"]:                  # 订单已按先卖后买排序
         sym, price = o["symbol"], price_of(o["symbol"])
         if o["action"] == "SELL":
+            if sym not in holdings:
+                raise ValueError(
+                    f"卖出 {sym} 失败:当前并不持有该标的。计划可能已被执行过"
+                    f"(execute_plan 非幂等),或计划与账户状态不匹配。"
+                )
             h = holdings.pop(sym)
             proceeds = h.shares * price
             comm = proceeds * cfg.commission

@@ -16,10 +16,14 @@ from .metrics import perf_metrics
 
 
 def weight_grid(step: float = 0.1) -> list[tuple[float, float, float]]:
-    """生成单纯形上的权重组合:w_bias + w_slope + w_efficiency = 1。"""
-    n = int(round(1 / step))
+    """生成单纯形上的权重组合:w_bias + w_slope + w_efficiency = 1。
+
+    按 i/n 归一化而不是直接乘 step:step 不能整除 1 时(如 0.15、0.3)
+    直接乘会让权重和偏离 1(实测 1.05 / 0.9),违背本函数的语义。
+    """
+    n = max(1, int(round(1 / step)))
     return [
-        (i * step, j * step, (n - i - j) * step)
+        (i / n, j / n, (n - i - j) / n)
         for i in range(n + 1)
         for j in range(n + 1 - i)
     ]

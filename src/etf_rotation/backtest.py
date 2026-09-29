@@ -122,13 +122,18 @@ def compute_target_set(
 
     banned = [s for s, ts in stopped.items() if t - ts < cfg.stop_cooldown_days]
     candidates = scores.drop(index=banned, errors="ignore")
-    target_set = select_targets(candidates, set(positions), cfg.rebalance_threshold, cfg.n_hold)
-    target_set = {s for s in target_set if _passes_risk_filters(s, data, t, cfg)}
+    # 风控筛选是**候选池的过滤器**,必须在选股之前:被剔掉的名额应由下一个合格候选
+    # 递补。若放在 select_targets 之后,被剔标的只是让槽位空着(第 3 名不递补)——
+    # V3.1 的溢价规则会把常居第一的 513100 反复剔掉,实测 32.7% 的持仓日只持 1 只,
+    # 与 n_hold 的分散意图相悖。
+    # 在持标的若不在合格池中仍会被剔除(= 离场),与 "该标的被筛掉则不持有" 的语义一致。
+    eligible = candidates.loc[[s for s in candidates.index if _passes_risk_filters(s, data, t, cfg)]]
+    target_set = select_targets(eligible, set(positions), cfg.rebalance_threshold, cfg.n_hold)
 
     # 入场确认:全空仓时,第一名须连续 confirm_days 天居首才允许建仓
     top: str | None = None
-    if not candidates.empty:
-        top = candidates.idxmax()
+    if not eligible.empty:
+        top = eligible.idxmax()
         top_streak[top] = top_streak.get(top, 0) + 1
         for s in list(top_streak):
             if s != top:

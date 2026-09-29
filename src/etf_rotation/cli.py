@@ -68,7 +68,7 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--take-profit", type=float, help="固定止盈:对成本价浮盈比例,如 0.25")
     p.add_argument("--confirm-days", type=int, help="入场确认天数:空仓时须连续N天评分第一才建仓")
     p.add_argument("--n-hold", type=int, help="持仓只数:1=原文全仓单标的,2=双标的等权分散")
-    p.add_argument("--premium-max", type=float, help="溢价率过滤:场内价对单位净值溢价超过该值禁止买入(如 0.07);v3 预设已含")
+    p.add_argument("--premium-max", type=float, help="溢价率过滤:场内价对单位净值溢价超过该值禁止买入(如 0.07);仅 v3.1 预设默认开启")
 
 
 def cmd_fetch(args) -> None:
@@ -93,8 +93,10 @@ def _with_premium(cfg: StrategyConfig, data: dict) -> dict:
             print(f"警告:{sym} 无溢价缓存,premium 规则对其静默失效!"
                   f"请先运行 cli fetch(会同时刷新 raw+nav 缓存)。", file=sys.stderr)
         elif st["stale"]:
-            print(f"警告:{sym} 溢价数据截至 {st['asof']},已过期;"
-                  f"建议先运行 cli fetch 刷新。", file=sys.stderr)
+            lag = st["nav_lag"]
+            detail = f"单位净值落后行情 {lag} 个交易日" if lag else "数据陈旧"
+            print(f"警告:{sym} 溢价数据截至 {st['asof']}({detail}),"
+                  f"规则可能建立在旧值上;建议先运行 cli fetch 刷新。", file=sys.stderr)
     return data
 
 
@@ -134,7 +136,8 @@ def cmd_plan(args) -> None:
     if cfg.premium_max is not None:
         status = premium_status(list(data))
         plan["premium_check"] = {
-            s: {"premium": st["premium"], "asof": st["asof"]} for s, st in status.items()
+            s: {"premium": st["premium"], "asof": st["asof"],
+                "nav_lag": st["nav_lag"], "stale": st["stale"]} for s, st in status.items()
         }
         plan["premium_rule"] = f"溢价 > {cfg.premium_max:.0%} 禁止买入(当日已自动排除)"
     store.save_state(new_state)      # 风控状态(锚点/禁买/连击)先落地,再谈成交
@@ -151,7 +154,8 @@ def main() -> None:
 
     p_bt = sub.add_parser("backtest", help="运行回测")
     p_bt.add_argument("--preset", choices=list(PRESETS), default="original",
-                      help="参数预设:v3=项目验证的推荐配置,original=忠实原文(默认)")
+                      help="参数预设:original=忠实原文(默认,年化42%%/回撤-32%%);"
+                           "v3.1=当前推荐(溢价过滤,年化30%%/回撤-12%%);v3/v2=历史版本")
     _add_param_args(p_bt)
 
     p_sw = sub.add_parser("sweep", help="参数遍历")

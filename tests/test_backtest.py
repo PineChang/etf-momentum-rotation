@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from etf_rotation.backtest import run_backtest
+from etf_rotation.backtest import _align, run_backtest
 from etf_rotation.config import StrategyConfig
 from etf_rotation.metrics import perf_metrics
 
@@ -55,6 +55,39 @@ class TestBacktestEngine:
         base = StrategyConfig(bias_ma_n=5, momentum_day=10, slope_n=10, efficiency_n=10, commission=0.0)
         taxed = StrategyConfig(bias_ma_n=5, momentum_day=10, slope_n=10, efficiency_n=10, commission=0.001)
         assert run_backtest(two_assets, taxed).equity.iloc[-1] < run_backtest(two_assets, base).equity.iloc[-1]
+
+
+class TestAlign:
+    def test_uses_date_intersection(self):
+        """各标的上市日不同:_align 必须取**交集**保证同日可比。
+
+        (旧测试只喂同日期的标的,取并集或用各自索引都能过,交集语义无人把关。)
+        """
+        a = synth_ohlc([10 + 0.1 * i for i in range(30)])
+        b = synth_ohlc([20 + 0.1 * i for i in range(30)], start="2024-01-15")
+        aligned = _align({"A": a, "B": b})
+        assert len(aligned["A"]) == len(aligned["B"])
+        assert len(aligned["A"]) < len(b)                       # 确实被截短了
+        assert aligned["A"]["date"].iloc[0] == b["date"].iloc[0]  # 起点=较晚者
+        assert list(aligned["A"]["date"]) == list(aligned["B"]["date"])  # 逐日对齐
+
+
+class TestConfirmDays:
+    def test_confirm_days_delays_entry(self):
+        """confirm_days=N 要求空仓时连续 N 天评分第一,首笔建仓应比 N=1 晚 N-1 个交易日。
+
+        (该分支此前零覆盖:把整段入场确认改成 if False 也全绿地通过。)
+        """
+        data = {"UP": synth_ohlc([10 + 0.1 * i for i in range(80)]),
+                "FLAT": synth_ohlc([10.0] * 80)}
+        kw = dict(bias_ma_n=5, momentum_day=10, slope_n=10, efficiency_n=10, commission=0.0)
+        cal = data["UP"]["date"]
+        i1 = int(cal[cal == run_backtest(data, StrategyConfig(**kw, confirm_days=1))
+                     .trades.iloc[0]["date"]].index[0])
+        i3 = int(cal[cal == run_backtest(data, StrategyConfig(**kw, confirm_days=3))
+                     .trades.iloc[0]["date"]].index[0])
+        assert i3 > i1
+        assert i3 - i1 == 2
 
 
 class TestMetrics:

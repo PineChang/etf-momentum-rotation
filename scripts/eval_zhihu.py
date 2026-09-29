@@ -16,7 +16,7 @@ import pandas as pd
 
 from etf_rotation.backtest import run_backtest
 from etf_rotation.config import UNIVERSE, StrategyConfig
-from etf_rotation.data import fetch_etf
+from etf_rotation.data import attach_premium, fetch_universe
 from etf_rotation.metrics import perf_metrics
 
 V3 = dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25)
@@ -25,18 +25,14 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
 def load_with_premium() -> dict[str, pd.DataFrame]:
-    """qfq 行情 + 注入 premium 列(未复权收盘/单位净值 - 1,按日期对齐)。"""
-    data = {}
-    for sym in UNIVERSE:
-        df = fetch_etf(sym)
-        raw = pd.read_csv(DATA_DIR / f"{sym}.raw.csv", parse_dates=["date"])
-        nav = pd.read_csv(DATA_DIR / f"{sym}.nav.csv", parse_dates=["date"])
-        prem = raw.merge(nav, on="date")
-        prem["premium"] = prem["close"] / prem["nav"] - 1
-        df = df.merge(prem[["date", "premium"]], on="date", how="left")
-        df["premium"] = df["premium"].ffill()
-        data[sym] = df
-    return data
+    """qfq 行情 + 注入 premium 列。
+
+    走 canonical 实现 `data.attach_premium`(未复权收盘/单位净值-1,**整体 shift 1 天
+    保证 PIT**)。本脚本早期版本在这里自行 merge、没有 shift,等价于在信号日就用到
+    当晚才公布的净值 —— 那一版的对照表含 1 日前视,数字已被替换(见
+    docs/audit-report.md 第八节的修订说明)。
+    """
+    return attach_premium(fetch_universe(list(UNIVERSE)))
 
 
 def seg_metrics(res, start=None, end=None) -> dict:

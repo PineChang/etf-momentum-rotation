@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from etf_rotation.scoring import combined_score, select_target, zscore
+from etf_rotation.scoring import _beats, combined_score, select_targets, zscore
 
 
 class TestZScore:
@@ -27,41 +27,67 @@ class TestZScore:
 
 class TestCombinedScore:
     def test_weighted_sum(self):
-        df = pd.DataFrame(
-            {"bias": [1.0, 3.0], "slope": [3.0, 1.0], "efficiency": [2.0, 2.0]},
-            index=["A", "B"],
-        )
+        """三列都取到互不相同的 z 值,权重必须真的参与计算。
+
+        (旧夹具让 z_efficiency ≡ 0 且 z_bias = -z_slope,硬编码 0.5/0.5/0.0
+        也能过,等于没锁住权重。)
+        """
+        df = pd.DataFrame({"bias": [1.0, 3.0, 6.0], "slope": [3.0, 1.0, 2.0],
+                           "efficiency": [2.0, 9.0, 2.0]},
+                          index=["A", "B", "C"])
         z = zscore(df)
+        assert z["efficiency"].abs().sum() > 0 and (z["bias"] + z["slope"]).abs().sum() > 0
         scores = combined_score(df, 0.3, 0.3, 0.4)
-        expected_a = 0.3 * z.loc["A", "bias"] + 0.3 * z.loc["A", "slope"] + 0.4 * z.loc["A", "efficiency"]
-        assert scores["A"] == pytest.approx(expected_a, rel=1e-12)
+        for sym in ("A", "B", "C"):
+            expected = (0.3 * z.loc[sym, "bias"] + 0.3 * z.loc[sym, "slope"]
+                        + 0.4 * z.loc[sym, "efficiency"])
+            assert scores[sym] == pytest.approx(expected, rel=1e-12)
+        # 换一组权重必须得到不同结果(否则等于忽略入参)
+        assert not scores.equals(combined_score(df, 0.5, 0.5, 0.0))
 
 
-class TestSelectTarget:
+class TestBeats:
+    """调仓阈值语义(审计 R1:负分区不得退化)。"""
+
+    def test_positive_region_equivalent_to_article_multiple(self):
+        """正分区必须与文章的 "挑战者 > 在持者 × 阈值" 完全等价。"""
+        for held in (0.5, 1.0, 2.0):
+            for thr in (1.2, 1.5, 2.0):
+                assert _beats(held, held * thr, thr) is False        # 恰好达界不算超过
+                assert _beats(held, held * thr + 1e-9, thr) is True
+
+    def test_negative_region_does_not_degenerate(self):
+        """负分区回归:旧公式 `挑战者 > 在持者 × 1.5` 在在持者为负时反向放行
+        (`-0.9 > -1.5` 成立),会把仓位换到更差的标的上。"""
+        assert _beats(-1.0, -0.9, 1.5) is False    # 只是"没那么差" -> 不换
+        assert _beats(-1.0, -0.4, 1.5) is True     # 显著更强 -> 换
+        assert (-0.9 > -1.0 * 1.5) is True         # 旧公式确实会放行这两种情况
+
+
+class TestSelectTargets:
+    """多持仓选择(生产路径)。单标的版 select_target 是死代码,已删除。"""
+
     def scores(self):
-        return pd.Series({"A": 1.0, "B": 1.2, "C": 0.5})
+        return pd.Series({"A": 2.0, "B": 1.0, "C": 0.5, "D": -3.0})
 
-    def test_cash_buys_best(self):
-        assert select_target(self.scores(), None, 1.5) == "B"
+    def test_empty_portfolio_fills_top_n(self):
+        assert select_targets(self.scores(), set(), 1.5, 2) == {"A", "B"}
 
-    def test_hold_when_already_best(self):
-        assert select_target(self.scores(), "B", 1.5) == "B"
+    def test_keeps_holdings_when_challenger_below_threshold(self):
+        assert select_targets(self.scores(), {"A", "B"}, 1.5, 2) == {"A", "B"}
 
     def test_no_switch_below_threshold(self):
-        """B 得分 1.2 < A 得分 1.0 * 1.5 → 不切换。"""
-        assert select_target(self.scores(), "A", 1.5) == "A"
+        s = pd.Series({"A": 5.0, "B": 1.0, "C": 1.4, "D": -1.0})
+        assert select_targets(s, {"A", "B"}, 1.5, 2) == {"A", "B"}   # 1.4 < 1.0×1.5
 
-    def test_switch_above_threshold(self):
-        """挑战者 1.6 > 持仓 1.0 * 1.5 → 切换。"""
-        scores = pd.Series({"A": 1.0, "B": 1.6})
-        assert select_target(scores, "A", 1.5) == "B"
+    def test_swaps_weakest_when_challenger_beats_threshold(self):
+        s = pd.Series({"A": 5.0, "B": 1.0, "C": 2.0, "D": -1.0})
+        assert select_targets(s, {"A", "B"}, 1.5, 2) == {"A", "C"}   # 2.0 > 1.0×1.5
 
-    def test_exact_boundary_no_switch(self):
-        """恰好等于 1.5 倍:文章语义为“超过”,边界不切换。"""
-        scores = pd.Series({"A": 1.0, "B": 1.5})
-        assert select_target(scores, "A", 1.5) == "A"
+    def test_held_missing_from_scores_is_dropped(self):
+        s = pd.Series({"A": 1.0, "B": 0.5})
+        assert select_targets(s, {"A", "GONE"}, 1.5, 2) == {"A", "B"}
 
-    def test_all_nan_keeps_current(self):
-        scores = pd.Series({"A": float("nan"), "B": float("nan")})
-        assert select_target(scores, "A", 1.5) == "A"
-        assert select_target(scores, None, 1.5) is None
+    def test_all_nan_returns_current(self):
+        s = pd.Series({"A": float("nan")})
+        assert select_targets(s, {"A"}, 1.5, 2) == {"A"}

@@ -203,6 +203,26 @@ class TestZhihuOptimizations:
         off = run_backtest(data, StrategyConfig(**BASE, n_hold=2))
         assert not off.trades[off.trades["symbol"] == "B"].empty
 
+    def test_screened_out_candidate_does_not_leave_empty_slot(self):
+        """回归:评分第一的标的被风控筛掉时,名额必须由下一个合格标的递补。
+
+        旧版先 select_targets 再过滤,被剔掉的标的只是让槽位空着 —— V3.1 的溢价
+        规则会把常居第一的 513100 反复剔掉,组合长期只持 1 只,违反 n_hold=2 的意图。
+        """
+        n = 45
+        # 评分排序:A(强) > B(中) > C(弱)
+        data = {"A": synth_ohlc(geom(20, 1.010, n)),
+                "B": synth_ohlc(geom(20, 1.006, n)),
+                "C": synth_ohlc(geom(20, 1.002, n))}
+        data["A"]["premium"] = 0.50          # 评分第一但溢价爆表 -> 被筛掉
+        for s in ("B", "C"):
+            data[s]["premium"] = 0.0
+
+        res = run_backtest(data, StrategyConfig(**BASE, n_hold=2, premium_max=0.01))
+        assert "A" not in res.holdings.iloc[-1]          # 被筛掉的确实不持有
+        assert res.holdings.iloc[-1] == "B+C"           # 两个槽位都被合格标的填满
+        assert res.trades[res.trades["symbol"] == "A"].empty   # 被筛掉的标的从未买入
+
 
 class TestPremiumRule:
     """溢价率 7% 购买规则(2026-09-29 写入 V3.1 预设)。"""
@@ -235,6 +255,29 @@ class TestPremiumRule:
         df = synth_ohlc(geom(20, 1.01, 30))
         out = data_mod.attach_premium({"A": df})
         assert "premium" not in out["A"].columns
+
+    def test_premium_status_flags_nav_lag(self, tmp_path, monkeypatch):
+        """回归:单位净值落后行情数据时必须报 stale。
+
+        旧版只按"距今 7 天内"判定新鲜度,513100 净值落后 3 个交易日仍报
+        stale=False,实盘就在一个 3 天前的溢价上做买入决策。
+        """
+        from etf_rotation import data as data_mod
+        monkeypatch.setattr(data_mod, "DATA_DIR", tmp_path)
+        bars = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=5)
+        pd.DataFrame({"date": bars, "close": 1.0}).to_csv(tmp_path / "LAG.raw.csv", index=False)
+        pd.DataFrame({"date": bars[:-3], "nav": 1.0}).to_csv(tmp_path / "LAG.nav.csv", index=False)
+        st = data_mod.premium_status(["LAG"])
+        assert st["LAG"]["missing"] is False
+        assert st["LAG"]["nav_lag"] == 3
+        assert st["LAG"]["stale"] is True
+
+        # 净值与行情同步(只落后当日净值,属正常)-> 不算 stale
+        pd.DataFrame({"date": bars, "close": 1.0}).to_csv(tmp_path / "OK.raw.csv", index=False)
+        pd.DataFrame({"date": bars, "nav": 1.0}).to_csv(tmp_path / "OK.nav.csv", index=False)
+        ok = data_mod.premium_status(["OK"])
+        assert ok["OK"]["nav_lag"] == 0
+        assert ok["OK"]["stale"] is False
 
     def test_premium_status_missing_and_stale(self, tmp_path, monkeypatch):
         """premium_status:无缓存 missing=True;旧数据 stale=True。"""

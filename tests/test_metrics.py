@@ -1,5 +1,6 @@
-"""metrics 往返交易配对逻辑测试(回归:窗口截取导致的首笔 SELL 错位)。"""
+"""metrics 往返交易配对逻辑 + 夏普口径测试(回归:窗口截取导致的首笔 SELL 错位)。"""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -65,3 +66,34 @@ class TestRoundTripPairing:
         assert m["n_round_trips"] == 1
         assert m["win_rate"] == pytest.approx(1.0)
         assert m["avg_hold_days"] == pytest.approx(19.0)
+
+    def test_round_trip_pnl_deducts_both_commissions(self):
+        """回归:往返盈亏必须扣双边佣金。
+
+        手续费 1 元 ×2、毛利仅 1 元 → 净亏;漏扣佣金会误判成盈利。
+        """
+        trades = pd.DataFrame([
+            {"date": pd.Timestamp("2025-01-01"), "action": "BUY", "symbol": "X",
+             "price": 10.0, "shares": 100.0, "commission": 1.0},
+            {"date": pd.Timestamp("2025-01-11"), "action": "SELL", "symbol": "X",
+             "price": 10.01, "shares": 100.0, "commission": 1.0},
+        ])
+        m = perf_metrics(equity(), trades)
+        assert m["n_round_trips"] == 1
+        assert m["win_rate"] == pytest.approx(0.0)      # 毛利 +1,佣金 -2 → 亏
+
+
+class TestSharpeConvention:
+    def test_sharpe_uses_mean_return_not_cagr(self):
+        """R5 修复锁定:夏普分子是日均收益年化,不是 CAGR。
+
+        CAGR 含波动拖累,与算术均值收益不等,足以区分两种口径。
+        """
+        rng = np.random.default_rng(0)
+        ret = rng.normal(0.0008, 0.02, 500)
+        eq = pd.Series(np.concatenate([[1.0], np.cumprod(1 + ret)]))
+        m = perf_metrics(eq)
+        r = eq.pct_change().dropna()
+        ann_vol = r.std(ddof=0) * np.sqrt(252)
+        assert m["sharpe"] == pytest.approx(r.mean() * 252 / ann_vol, rel=1e-12)
+        assert abs(m["sharpe"] - m["cagr"] / ann_vol) > 1e-3   # 两种口径必须可区分

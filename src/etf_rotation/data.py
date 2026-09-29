@@ -129,26 +129,42 @@ def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     return out
 
 
-def premium_status(symbols: list[str], stale_days: int = 7) -> dict[str, dict]:
-    """溢价数据健康检查:{symbol: {premium, asof, missing, stale}}。
+def premium_status(symbols: list[str], max_lag_days: int = 1,
+                   max_age_days: int = 7) -> dict[str, dict]:
+    """溢价数据健康检查:{symbol: {premium, asof, nav_lag, missing, stale}}。
 
     missing = 无 raw/nav 缓存(规则对该标的静默失效);
-    stale   = 最新溢价数据距今超 stale_days 天(溢价估计漂移,规则可靠性下降)。
+    nav_lag = 单位净值落后行情数据多少个交易日 —— 溢价率的口径是"场内价 / 当日
+              单位净值",净值当晚才公布。净值一旦落后,算出的溢价就是旧值。
+              实测 513100 曾落后 3 个交易日(溢价读数 13.93% 实为 3 日前的数),
+              而只按"距今 7 天内"判定会认为它很新鲜,规则就在过期数据上静默决策;
+    stale   = nav_lag > max_lag_days,或最新溢价距今超 max_age_days 天(缓存久未刷新)。
     """
     today = pd.Timestamp.today().normalize()
     out = {}
     for sym in symbols:
         prem = fetch_premium(sym)
+        raw_f = DATA_DIR / f"{sym}.raw.csv"
+        nav_f = DATA_DIR / f"{sym}.nav.csv"
+        raw_dates = nav_last = None
+        if raw_f.exists():
+            raw_dates = pd.read_csv(raw_f, usecols=["date"], parse_dates=["date"])["date"]
+        if nav_f.exists():
+            nav_last = pd.read_csv(nav_f, usecols=["date"], parse_dates=["date"])["date"].max()
+        lag = int((raw_dates > nav_last).sum()) if raw_dates is not None and nav_last is not None else None
         if prem.empty:
-            out[sym] = {"premium": None, "asof": None, "missing": True, "stale": True}
-        else:
-            asof = prem.index[-1]
-            out[sym] = {
-                "premium": round(float(prem.iloc[-1]), 4),
-                "asof": str(asof.date()),
-                "missing": False,
-                "stale": (today - asof).days > stale_days,
-            }
+            out[sym] = {"premium": None, "asof": None, "nav_lag": lag,
+                        "missing": True, "stale": True}
+            continue
+        asof = prem.index[-1]
+        stale = (lag is not None and lag > max_lag_days) or (today - asof).days > max_age_days
+        out[sym] = {
+            "premium": round(float(prem.iloc[-1]), 4),
+            "asof": str(asof.date()),
+            "nav_lag": lag,
+            "missing": False,
+            "stale": stale,
+        }
     return out
 
 

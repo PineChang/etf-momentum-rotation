@@ -41,26 +41,6 @@ def _beats(score_held: float, score_challenger: float, threshold: float) -> bool
     return score_challenger > score_held + (threshold - 1.0) * abs(score_held)
 
 
-def select_target(scores: pd.Series, current: str | None, threshold: float) -> str | None:
-    """按调仓阈值机制选出目标持仓。
-
-    - 空仓:直接选评分最高者。
-    - 持仓已是最高分:继续持有。
-    - 否则:仅当挑战者显著超出当前持仓得分(见 _beats)才切换。
-    """
-    scores = scores.dropna()
-    if scores.empty:
-        return current
-    best = scores.idxmax()
-    if current is None:
-        return best
-    if best == current or current not in scores.index:
-        return best if current not in scores.index else current
-    if _beats(scores[current], scores[best], threshold):
-        return best
-    return current
-
-
 def select_targets(scores: pd.Series, current: set[str], threshold: float, n: int) -> set[str]:
     """多持仓版本:选出 top-n 目标集合,阈值机制的自然推广。
 
