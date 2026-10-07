@@ -72,3 +72,62 @@ class TestDashboard:
         record_equity(store, 49_000.0, 43_000.0)
         lines = (tmp_path / "equity.csv").read_text().splitlines()
         assert len(lines) == 2           # header + 今日一行
+
+
+class TestDualTrack:
+    """双轨对照:compare_fills 配对与价差,gm 快照渲染,未配置占位。"""
+
+    LOCAL_FILLS = [{"plan_date": "2026-10-07",
+                    "fills": [{"action": "BUY", "symbol": "512890", "fill_price": 1.190,
+                               "limit_price": 1.208}]}]
+    GM_ORDERS = [{"plan_date": "2026-10-07", "symbol": "512890", "side": "BUY",
+                  "limit_price": 1.208, "est_budget": 50000.0}]
+    GM_EXECS = [{"symbol": "512890", "side": "BUY", "price": 1.195, "volume": 40000,
+                 "created_at": "2026-10-08 09:31:05"},
+                {"symbol": "512890", "side": "BUY", "price": 1.185, "volume": 1300,
+                 "created_at": "2026-10-08 09:31:05"}]
+
+    def test_compare_fills_vwap_and_bp(self):
+        from etf_rotation.dashboard import compare_fills
+        rows = compare_fills(self.LOCAL_FILLS, self.GM_ORDERS, self.GM_EXECS)
+        assert len(rows) == 1
+        r = rows[0]
+        # B 轨成交均价 = (1.195*40000 + 1.185*1300) / 41300 ≈ 1.19469
+        assert r["b_price"] == pytest.approx(1.19469, rel=1e-4)
+        assert r["b_volume"] == 41300
+        assert r["diff_bp"] == pytest.approx((1.19469 / 1.190 - 1) * 1e4, abs=0.2)
+
+    def test_compare_fills_without_gm_data(self):
+        from etf_rotation.dashboard import compare_fills
+        rows = compare_fills(self.LOCAL_FILLS, [], [])
+        assert rows[0]["b_price"] is None and rows[0]["diff_bp"] is None
+
+    def test_render_with_gm_snapshot(self, tmp_path):
+        import pandas as pd
+        from etf_rotation.dashboard import render_dashboard
+        from scripts.gm_paper import write_gm_snapshot  # noqa: 惰性 gm 导入,可加载
+
+        store = StateStore(tmp_path)
+        store.save_state(LiveState(cash=100_000.0))
+        store.append_log({"type": "fill", **self.LOCAL_FILLS[0],
+                          "data_asof": "2026-09-30"})
+        (tmp_path / "gm_orders.jsonl").write_text(
+            json.dumps(self.GM_ORDERS[0], ensure_ascii=False) + "\n")
+        write_gm_snapshot(tmp_path, {"nav": 100_500.0, "cash_available": 50_500.0},
+                          [{"symbol": "512890", "volume": 41300, "vwap": 1.1947,
+                            "market_value": 49_400.0}], self.GM_EXECS)
+        df = pd.DataFrame({"date": pd.bdate_range("2026-09-28", periods=3),
+                           "open": 1.2, "high": 1.2, "low": 1.2, "close": 1.2, "volume": 1e6})
+        html = render_dashboard(store, {"512890": df}, tmp_path / "dashboard.html").read_text()
+        assert "B 轨 · 掘金仿真净值" in html and "100,500" in html
+        assert "双轨逐笔对照" in html and "+39.4" in html   # diff_bp ≈ +39.4
+
+    def test_render_without_gm_shows_placeholder(self, tmp_path):
+        import pandas as pd
+        from etf_rotation.dashboard import render_dashboard
+        store = StateStore(tmp_path)
+        store.save_state(LiveState(cash=100_000.0))
+        df = pd.DataFrame({"date": pd.bdate_range("2026-09-28", periods=3),
+                           "open": 1.2, "high": 1.2, "low": 1.2, "close": 1.2, "volume": 1e6})
+        html = render_dashboard(store, {"512890": df}, tmp_path / "dashboard.html").read_text()
+        assert "未配置" in html

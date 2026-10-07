@@ -85,6 +85,79 @@ def _equity_chart(store: StateStore) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def compare_fills(local_fills: list[dict], gm_orders: list[dict], gm_execs: list[dict]) -> list[dict]:
+    """双轨逐笔对照:A 轨(本地记账)成交价 vs B 轨(掘金仿真)成交价。
+
+    local_fills: trade_log 的 fill 记录 [{plan_date, fills:[{action,symbol,fill_price}]}]
+    gm_orders:   gm_paper 送单记录 [{plan_date,symbol,side,limit_price}]
+    gm_execs:    掘金成交回报 [{symbol,side,price,volume,created_at}]
+    配对键:(plan_date, symbol, side);B 轨价格取该单当日的成交均价。
+    返回 [{plan_date, symbol, side, a_price, b_price, diff_bp, b_volume}](无 B 轨数据则 b_* 为 None)。
+    """
+    out = []
+    for f in local_fills:
+        for x in f["fills"]:
+            key = (f["plan_date"], x["symbol"], x["action"])
+            sent = next((o for o in gm_orders
+                         if (o["plan_date"], o["symbol"], o["side"]) == key), None)
+            b_price = b_vol = None
+            if sent is not None:
+                same = [e for e in gm_execs
+                        if e["symbol"] == x["symbol"] and e["side"] == x["action"]
+                        and abs((pd.Timestamp(e["created_at"]) - pd.Timestamp(f["plan_date"])).days) <= 3]
+                if same:
+                    b_vol = sum(e["volume"] for e in same)
+                    b_price = sum(e["price"] * e["volume"] for e in same) / b_vol
+            diff_bp = round((b_price / x["fill_price"] - 1) * 1e4, 1) if b_price else None
+            out.append({"plan_date": f["plan_date"], "symbol": x["symbol"], "side": x["action"],
+                        "a_price": x["fill_price"], "b_price": b_price,
+                        "diff_bp": diff_bp, "b_volume": b_vol})
+    return out
+
+
+def _render_gm_track(store: StateStore, local_fills: list[dict], local_total: float) -> str:
+    """双轨对照区块(B 轨 = 掘金仿真);未配置时返回占位说明。"""
+    snap_f = store.dir / "gm_snapshot.json"
+    orders_f = store.dir / "gm_orders.jsonl"
+    if not snap_f.exists():
+        return ("<p class='dim'>B 轨(掘金仿真)未配置——注册 sim.myquant.cn 拿 token 后运行 "
+                "<code>scripts/gm_paper.py --token &lt;token&gt;</code>,此处即显示真实撮合对照。</p>")
+
+    snap = json.loads(snap_f.read_text())
+    acct = snap.get("account", {})
+    gm_orders = ([json.loads(x) for x in orders_f.read_text().splitlines()]
+                 if orders_f.exists() else [])
+    rows = ""
+    for c in compare_fills(local_fills, gm_orders, snap.get("executions", [])):
+        b = f"{c['b_price']:.3f}" if c["b_price"] else "—"
+        d = (f"<span class='{_cls(-c['diff_bp'])}'>{c['diff_bp']:+.1f}</span>"
+             if c["diff_bp"] is not None else "—")
+        rows += (f"<tr><td>{c['plan_date']}</td>"
+                 f"<td><span class='badge {c['side'].lower()}'>{c['side']}</span></td>"
+                 f"<td>{c['symbol']} {UNIVERSE.get(c['symbol'], '')}</td>"
+                 f"<td>{c['a_price']:.3f}</td><td>{b}</td><td>{d}</td>"
+                 f"<td class='dim'>{c['b_volume'] or '—'}</td></tr>")
+    if not rows:
+        rows = "<tr><td colspan='7' class='dim'>B 轨已配置,暂无成交可对照</td></tr>"
+    pos_rows = "".join(
+        f"<tr><td>{p['symbol']}</td><td>{p['volume']:,.0f}</td>"
+        f"<td>{p.get('vwap', 0):.3f}</td><td>{p.get('market_value', 0):,.0f}</td></tr>"
+        for p in snap.get("positions", [])) or "<tr><td colspan='4' class='dim'>(空仓)</td></tr>"
+    nav = acct.get("nav", 0.0)
+    return f"""
+<div class="cards">
+  <div class="card"><div class="k">A 轨 · 本地记账净值</div><div class="v">{local_total:,.0f}</div></div>
+  <div class="card"><div class="k">B 轨 · 掘金仿真净值</div><div class="v">{nav:,.0f}</div></div>
+  <div class="card"><div class="k">B 轨可用现金</div><div class="v">{acct.get('cash_available', 0):,.0f}</div></div>
+  <div class="card"><div class="k">快照时间</div><div class="v" style="font-size:14px">{snap.get('updated_at', '—')}</div></div>
+</div>
+<h2>双轨逐笔对照(价差 bp,正 = B 轨买得更贵)</h2>
+<div class="scroll"><table><tr><th>计划日</th><th>方向</th><th>标的</th><th>A 轨价</th><th>B 轨价</th><th>价差 bp</th><th>B 成交量</th></tr>
+{rows}</table></div>
+<h2>B 轨持仓(掘金仿真账户)</h2>
+<table><tr><th>标的</th><th>数量</th><th>成本均价</th><th>市值</th></tr>{pos_rows}</table>"""
+
+
 def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path: str | Path) -> Path:
     """渲染仪表盘 HTML。data = {symbol: 行情 df}(读缓存即可,纯离线)。"""
     out_path = Path(out_path)
@@ -134,17 +207,18 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
                           f"{' / ⚠️ 陈旧' if st['stale'] else ''}</td></tr>")
 
     # ---- 成交历史 ----
-    fill_rows = ""
+    fills: list[dict] = []
     if store.log_file.exists():
-        recs = [json.loads(x) for x in store.log_file.read_text().splitlines()]
-        fills = [r for r in recs if r.get("type") == "fill"]
-        for f in reversed(fills):
-            for x in f["fills"]:
-                fill_rows += (f"<tr><td>{f['plan_date']}</td>"
-                              f"<td><span class='badge {x['action'].lower()}'>{x['action']}</span></td>"
-                              f"<td>{x['symbol']} {UNIVERSE.get(x['symbol'], '')}</td>"
-                              f"<td>{x['fill_price']}</td>"
-                              f"<td class='dim'>限价 {x.get('limit_price', '—')}</td></tr>")
+        fills = [r for r in (json.loads(x) for x in store.log_file.read_text().splitlines())
+                 if r.get("type") == "fill"]
+    fill_rows = ""
+    for f in reversed(fills):
+        for x in f["fills"]:
+            fill_rows += (f"<tr><td>{f['plan_date']}</td>"
+                          f"<td><span class='badge {x['action'].lower()}'>{x['action']}</span></td>"
+                          f"<td>{x['symbol']} {UNIVERSE.get(x['symbol'], '')}</td>"
+                          f"<td>{x['fill_price']}</td>"
+                          f"<td class='dim'>限价 {x.get('limit_price', '—')}</td></tr>")
     if not fill_rows:
         fill_rows = "<tr><td colspan='5' class='dim'>尚无成交</td></tr>"
 
@@ -181,6 +255,7 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
 <h2>成交历史</h2>
 <div class="scroll"><table><tr><th>日期</th><th>方向</th><th>标的</th><th>成交价</th><th>计划限价</th></tr>
 {fill_rows}</table></div>
+<h2>双轨对照(A 本地记账 vs B 掘金仿真)</h2>{_render_gm_track(store, fills, total)}
 <p class="sub" style="margin-top:16px">禁买名单: {state.stopped or '无'} · 评分连击: {state.top_streak or '无'}</p>
 </body></html>"""
     out_path.write_text(html)
