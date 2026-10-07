@@ -7,10 +7,16 @@
 
 准备步骤(一次性):
   1. sim.myquant.cn 注册,创建股票仿真账户,获取 token;
-  2. pip install gm   (掘金 SDK,gm 3.x);
+  2. pip install gmtrade;
   3. 每晚照常:cron 的 daily_paper.sh evening(fetch + plan + dashboard)
 
-运行(每个交易日挂着):
+⚠️ 平台限制(2026-10 实测):gmtrade 在 PyPI 上只有 **Windows / manylinux x86_64、
+Python ≤3.10** 的二进制轮子,**macOS 无法原生安装**。Mac 用户两条路:
+  - 手工路径(零安装):网页创建仿真账户 + 每日网页手工下限价单 + 定期"下载交易数据"
+    CSV,用 scripts/gm_import_csv.py 导入,仪表盘双轨对照同样可用;
+  - 自动化路径:Linux 环境(Docker / 云主机)里跑本文件。
+
+运行(Linux/Windows,每个交易日挂着):
   PYTHONPATH=src python scripts/gm_paper.py --token <你的token>
   - 09:31 读最新计划 → 限价单送掘金仿真账户,送单记录写 state/gm_orders.jsonl;
   - 09:35 / 15:05 同步账户快照(净值/持仓/成交回报)→ state/gm_snapshot.json

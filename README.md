@@ -61,9 +61,14 @@ PYTHONPATH=src python -m pytest tests/ -q        # 107 passed
 
 **虚盘(模拟盘)闭环**:每晚 `cli fetch` + `cli plan` 生成计划,次日 9:30 后 `cli execute`
 按真实开盘价成交并记账(限价单开盘价未成交则整批放弃、可稍候重跑;同一计划拒绝重复执行;
-非交易日自动跳过)。`cli status` 随时查看持仓/浮盈亏/权益/最近成交(纯离线读缓存)。
-也可挂掘金仿真账户(sim.myquant.cn,免费免开户):`scripts/gm_paper.py` 每天 09:31 自动把
-计划单转成掘金限价单——信号始终由本仓库引擎生成,掘金只做下单通道。
+非交易日自动跳过)。`cli status` 随时查看持仓/浮盈亏/权益/最近成交(纯离线读缓存),
+`cli dashboard --open` 生成网页仪表盘(浏览器直接看)。
+
+**双轨对照(可选,B 轨 = 掘金仿真)**:同一信号源送掘金仿真账户真实撮合,仪表盘逐笔比较
+两边成交价差。⚠️ 掘金 gmtrade SDK 仅 Windows/Linux 二进制(无 macOS 轮子),Mac 用户走
+**手工路径**:sim.myquant.cn 网页创建仿真账户 → 每日网页手工下限价单(月均 ~3 次)→
+定期"下载交易数据"CSV 后用 `scripts/gm_import_csv.py <文件>` 导入,双轨对照即激活;
+Linux/Docker/云主机用户可直接挂 `scripts/gm_paper.py --token <token>` 全自动送单+同步。
 
 **全自动挂机(macOS cron)**:`scripts/daily_paper.sh morning|evening` 已封装好每日任务,
 `crontab -e` 加入下面两行即可(注意给 cron 授予完全磁盘访问权限、并防止电脑到点休眠):

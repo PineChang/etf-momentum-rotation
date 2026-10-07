@@ -85,29 +85,26 @@ def _equity_chart(store: StateStore) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def compare_fills(local_fills: list[dict], gm_orders: list[dict], gm_execs: list[dict]) -> list[dict]:
+def compare_fills(local_fills: list[dict], gm_execs: list[dict]) -> list[dict]:
     """双轨逐笔对照:A 轨(本地记账)成交价 vs B 轨(掘金仿真)成交价。
 
     local_fills: trade_log 的 fill 记录 [{plan_date, fills:[{action,symbol,fill_price}]}]
-    gm_orders:   gm_paper 送单记录 [{plan_date,symbol,side,limit_price}]
     gm_execs:    掘金成交回报 [{symbol,side,price,volume,created_at}]
-    配对键:(plan_date, symbol, side);B 轨价格取该单当日的成交均价。
+    配对:按 (symbol, side, 计划日 ±3 天) 匹配,B 轨价格取成交量加权均价。
+    (窗口内同标的同方向多笔计划单会合并计算,月均 ~3 次调仓下可接受。)
     返回 [{plan_date, symbol, side, a_price, b_price, diff_bp, b_volume}](无 B 轨数据则 b_* 为 None)。
     """
     out = []
     for f in local_fills:
         for x in f["fills"]:
             key = (f["plan_date"], x["symbol"], x["action"])
-            sent = next((o for o in gm_orders
-                         if (o["plan_date"], o["symbol"], o["side"]) == key), None)
+            same = [e for e in gm_execs
+                    if e["symbol"] == x["symbol"] and e["side"] == x["action"]
+                    and abs((pd.Timestamp(e["created_at"]) - pd.Timestamp(f["plan_date"])).days) <= 3]
             b_price = b_vol = None
-            if sent is not None:
-                same = [e for e in gm_execs
-                        if e["symbol"] == x["symbol"] and e["side"] == x["action"]
-                        and abs((pd.Timestamp(e["created_at"]) - pd.Timestamp(f["plan_date"])).days) <= 3]
-                if same:
-                    b_vol = sum(e["volume"] for e in same)
-                    b_price = sum(e["price"] * e["volume"] for e in same) / b_vol
+            if same:
+                b_vol = sum(e["volume"] for e in same)
+                b_price = sum(e["price"] * e["volume"] for e in same) / b_vol
             diff_bp = round((b_price / x["fill_price"] - 1) * 1e4, 1) if b_price else None
             out.append({"plan_date": f["plan_date"], "symbol": x["symbol"], "side": x["action"],
                         "a_price": x["fill_price"], "b_price": b_price,
@@ -118,17 +115,14 @@ def compare_fills(local_fills: list[dict], gm_orders: list[dict], gm_execs: list
 def _render_gm_track(store: StateStore, local_fills: list[dict], local_total: float) -> str:
     """双轨对照区块(B 轨 = 掘金仿真);未配置时返回占位说明。"""
     snap_f = store.dir / "gm_snapshot.json"
-    orders_f = store.dir / "gm_orders.jsonl"
     if not snap_f.exists():
         return ("<p class='dim'>B 轨(掘金仿真)未配置——注册 sim.myquant.cn 拿 token 后运行 "
                 "<code>scripts/gm_paper.py --token &lt;token&gt;</code>,此处即显示真实撮合对照。</p>")
 
     snap = json.loads(snap_f.read_text())
     acct = snap.get("account", {})
-    gm_orders = ([json.loads(x) for x in orders_f.read_text().splitlines()]
-                 if orders_f.exists() else [])
     rows = ""
-    for c in compare_fills(local_fills, gm_orders, snap.get("executions", [])):
+    for c in compare_fills(local_fills, snap.get("executions", [])):
         b = f"{c['b_price']:.3f}" if c["b_price"] else "—"
         d = (f"<span class='{_cls(-c['diff_bp'])}'>{c['diff_bp']:+.1f}</span>"
              if c["diff_bp"] is not None else "—")

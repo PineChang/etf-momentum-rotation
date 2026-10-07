@@ -89,7 +89,7 @@ class TestDualTrack:
 
     def test_compare_fills_vwap_and_bp(self):
         from etf_rotation.dashboard import compare_fills
-        rows = compare_fills(self.LOCAL_FILLS, self.GM_ORDERS, self.GM_EXECS)
+        rows = compare_fills(self.LOCAL_FILLS, self.GM_EXECS)
         assert len(rows) == 1
         r = rows[0]
         # B 轨成交均价 = (1.195*40000 + 1.185*1300) / 41300 ≈ 1.19469
@@ -99,7 +99,7 @@ class TestDualTrack:
 
     def test_compare_fills_without_gm_data(self):
         from etf_rotation.dashboard import compare_fills
-        rows = compare_fills(self.LOCAL_FILLS, [], [])
+        rows = compare_fills(self.LOCAL_FILLS, [])
         assert rows[0]["b_price"] is None and rows[0]["diff_bp"] is None
 
     def test_render_with_gm_snapshot(self, tmp_path):
@@ -111,8 +111,6 @@ class TestDualTrack:
         store.save_state(LiveState(cash=100_000.0))
         store.append_log({"type": "fill", **self.LOCAL_FILLS[0],
                           "data_asof": "2026-09-30"})
-        (tmp_path / "gm_orders.jsonl").write_text(
-            json.dumps(self.GM_ORDERS[0], ensure_ascii=False) + "\n")
         write_gm_snapshot(tmp_path, {"nav": 100_500.0, "cash_available": 50_500.0},
                           [{"symbol": "512890", "volume": 41300, "vwap": 1.1947,
                             "market_value": 49_400.0}], self.GM_EXECS)
@@ -131,3 +129,49 @@ class TestDualTrack:
                            "open": 1.2, "high": 1.2, "low": 1.2, "close": 1.2, "volume": 1e6})
         html = render_dashboard(store, {"512890": df}, tmp_path / "dashboard.html").read_text()
         assert "未配置" in html
+
+
+class TestGmCsvImport:
+    """掘金仿真 CSV 下载 → gm_snapshot.json 导入(Mac 手工路径)。"""
+
+    def test_import_cash_position_exec(self, tmp_path, monkeypatch):
+        import importlib.util
+        from pathlib import Path
+
+        import pandas as pd
+
+        spec = importlib.util.spec_from_file_location(
+            "gm_import_csv", Path(__file__).resolve().parents[1] / "scripts" / "gm_import_csv.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        src = tmp_path / "dl"
+        src.mkdir()
+        pd.DataFrame({"symbol": ["SHSE.512890"], "nav": [100500.0],
+                      "available": [50500.0], "frozen": [0.0]}).to_csv(src / "cash.csv", index=False)
+        pd.DataFrame({"symbol": ["SHSE.512890"], "volume": [41300],
+                      "vwap": [1.1947], "market_value": [49400.0]}).to_csv(src / "position.csv", index=False)
+        pd.DataFrame({"symbol": ["SHSE.512890"], "side": [1], "price": [1.195],
+                      "volume": [41300], "created_at": ["2026-10-08 09:31:05"]}
+                     ).to_csv(src / "execution.csv", index=False)
+
+        state = tmp_path / "state"
+        state.mkdir()
+        tables = mod._read_tables(src)
+        assert set(tables) == {"cash", "position", "exec"}
+        from gm_paper import write_gm_snapshot  # noqa: scripts/ 命名空间可导入(gm 惰性)
+        account = {"nav": 100500.0, "cash_available": 50500.0, "frozen": 0.0}
+        snap = write_gm_snapshot(state, account,
+                                 [{"symbol": "512890", "volume": 41300, "vwap": 1.1947,
+                                   "market_value": 49400.0}],
+                                 [{"symbol": "512890", "side": "BUY", "price": 1.195,
+                                   "volume": 41300, "created_at": "2026-10-08 09:31:05"}])
+        data = json.loads(snap.read_text())
+        assert data["account"]["nav"] == 100500.0
+        assert data["executions"][0]["side"] == "BUY"
+        # 中文表头也应识别(映射多候选)
+        pd.DataFrame({"代码": ["SHSE.512890"], "方向": ["买入"], "成交价": [1.19],
+                      "成交量": [41300], "成交时间": ["2026-10-08 09:31:05"]}
+                     ).to_csv(src / "execution_cn.csv", index=False)
+        df = pd.read_csv(src / "execution_cn.csv")
+        assert mod._pick(df, "symbol") == "代码" and mod._pick(df, "price") == "成交价"

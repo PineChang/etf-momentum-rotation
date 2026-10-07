@@ -224,3 +224,20 @@ base64 净值图,`<meta refresh>` 5 分钟自刷),由 `daily_paper.sh` 在每次
 - 未配置 token 时区块显示占位说明,不影响 A 轨使用。
 
 测试 108 → 112(配对/VWAP/价差 ×2、快照渲染、占位)。
+
+## 16. B 轨的 Mac 现实:gmtrade 无 macOS 轮子,改手工+CSV 导入(2026-10-07)
+
+用户注册 sim.myquant.cn 后发现要下载 Windows 客户端(Mac 无法安装)。核实结论:
+
+- **在线仿真服务(sim.myquant.cn)本身不需要客户端**:账户创建/手工交易/数据下载全在
+  网页完成;API 走 `gmtrade.api` 直连云端 `api.myquant.cn:9000`(set_token + set_endpoint
+  + account + login),不依赖本地终端;
+- **但 gmtrade 在 PyPI 只有 Windows/manylinux x86_64、Python≤3.10 的二进制轮子**,
+  macOS(尤其 Apple Silicon)原生装不了,本机也没有 Docker;
+- 因此 B 轨在 Mac 上改走**手工路径**:网页创建仿真账户 → 每日网页手工下限价单
+  (月均 ~3 次)→ 定期"下载交易数据"CSV → `scripts/gm_import_csv.py` 导入
+  (列名多候选防御,自动识别 资金/持仓/成交)→ gm_snapshot.json → 仪表盘双轨对照;
+- `gm_paper.py` 保留给 Linux/Docker/云主机自动化场景,头部已注明平台限制;
+- `compare_fills` 配对放宽:无送单记录时直接按 (symbol, side, ±3天) 匹配成交回报。
+
+测试 112 → 113(CSV 识别/快照/中文表头映射)。
