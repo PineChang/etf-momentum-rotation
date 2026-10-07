@@ -13,14 +13,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pandas as pd
 
 from .backtest import run_backtest
 from .config import UNIVERSE, StrategyConfig
-from .data import attach_premium, fetch_today_opens, fetch_universe, premium_status, update_premium_caches
+from .data import (DATA_DIR, attach_premium, fetch_today_opens, fetch_universe,
+                   premium_status, update_premium_caches)
 from .live import StateStore, check_fillable_at_open, execute_plan, make_plan
 from .metrics import format_metrics, perf_metrics
 
@@ -131,12 +132,28 @@ def cmd_sweep(args) -> None:
     print("提示(文章原话):参数最优存在过拟合风险,不要太执着于调参。")
 
 
+def _plan_unchanged(store: StateStore, plan: dict, cfg: StrategyConfig) -> bool:
+    """同一信号日 + 同一参数 => 计划不变,不重复落盘。
+
+    防止非交易日/手动重跑 plan 把同一信号重复写进日志、top_streak 被重复推进。
+    """
+    last = store.latest_plan()
+    if last is None or last.get("data_asof") != plan["data_asof"]:
+        return False
+    if not store.params_file.exists():
+        return False
+    return json.loads(store.params_file.read_text()) == asdict(cfg)
+
+
 def cmd_plan(args) -> None:
     cfg = _cfg_from_args(args)
     data = _with_premium(cfg, fetch_universe(list(UNIVERSE)))
     store = StateStore(STATE_DIR)
     state = store.load_state(cfg.initial_cash)
     plan, new_state = make_plan(data, state, cfg)
+    if _plan_unchanged(store, plan, cfg):
+        print(f"信号日 {plan['data_asof']} 的计划已生成过且参数未变,跳过(避免连击重复推进)")
+        return
     if cfg.premium_max is not None:
         status = premium_status(list(data))
         plan["premium_check"] = {
@@ -177,7 +194,11 @@ def cmd_execute(args) -> None:
     else:                                   # 兼容:从未跑过 plan 直接 execute 的情况
         cfg = StrategyConfig(**PRESETS["v3.1"])
 
-    open_prices = fetch_today_opens(list(UNIVERSE))
+    try:
+        open_prices = fetch_today_opens(list(UNIVERSE))
+    except Exception as e:
+        print(f"今日无法执行({e})——非交易日或行情未开始,跳过")
+        return
     problems = check_fillable_at_open(plan, open_prices)
     if problems:
         print("以下限价单在开盘价未成交,本次整批不执行(可稍候重跑):")
@@ -196,6 +217,49 @@ def cmd_execute(args) -> None:
         print(f"  {f['action']} {f['symbol']} @ {f['fill_price']}  (限价 {f['limit_price']})")
     print(f"现金 {new_state.cash:.2f} | 持仓 {sorted(new_state.holdings) or '空仓'} "
           f"| 累计已实现盈亏 {new_state.realized_pnl:.2f}")
+
+
+def cmd_status(args) -> None:
+    """每日查看:现金/持仓(浮盈亏)/权益/风控状态/待执行计划/最近成交。
+
+    直接读本地缓存(纯离线)——status 必须永远可用,不能因数据源限流而挂。
+    """
+    store = StateStore(STATE_DIR)
+    state = store.load_state()
+    data = {s: pd.read_csv(DATA_DIR / f"{s}.csv", parse_dates=["date"]) for s in UNIVERSE
+            if (DATA_DIR / f"{s}.csv").exists()}
+    closes = {s: float(df["close"].iloc[-1]) for s, df in data.items()}
+    asof = str(data[list(data)[0]]["date"].iloc[-1].date()) if data else "无数据"
+
+    mv = sum(h.shares * closes.get(s, 0.0) for s, h in state.holdings.items())
+    print(f"=== 账户状态(行情截至 {asof})===")
+    print(f"现金 {state.cash:,.2f} | 持仓市值 {mv:,.2f} | 总权益 {state.cash + mv:,.2f}")
+    for s, h in sorted(state.holdings.items()):
+        px = closes.get(s)
+        if px:
+            print(f"  {s} {UNIVERSE.get(s, '')}: {h.shares:,.0f} 份 | 成本 {h.cost:.3f} → 现价 {px:.3f} "
+                  f"| 浮盈亏 {px / h.cost - 1:+.2%} ({h.shares * (px - h.cost):+,.0f} 元) "
+                  f"| 移动止损锚点 {h.peak:.3f}")
+    if not state.holdings:
+        print("  (空仓)")
+    print(f"累计已实现盈亏 {state.realized_pnl:+,.2f} | 初始本金 {state.cash + mv - state.realized_pnl:,.2f}(含浮动)")
+    stopped = ", ".join(f"{k}(自 {v})" for k, v in state.stopped.items()) or "无"
+    print(f"禁买名单: {stopped} | 评分连击: {state.top_streak or '无'}")
+
+    plan = store.latest_plan()
+    if plan and not store.plan_executed(plan):
+        acts = ("; ".join(f"{o['action']} {o['symbol']} 限价 {o['limit_price']}"
+                          for o in plan["orders"]) or "无订单(空仓)")
+        print(f"待执行计划({plan['plan_date']} 生成,信号日 {plan['data_asof']}): {acts}")
+
+    if store.log_file.exists():
+        fills = [json.loads(x) for x in store.log_file.read_text().splitlines()
+                 if json.loads(x).get("type") == "fill"]
+        if fills:
+            print("最近成交(新→旧,最多 8 条):")
+            for f in reversed(fills[-8:]):
+                for x in f["fills"]:
+                    print(f"  {f['plan_date']} {x['action']} {x['symbol']} @ {x['fill_price']}")
 
 
 def main() -> None:
@@ -219,10 +283,11 @@ def main() -> None:
     _add_param_args(p_plan)
 
     sub.add_parser("execute", help="开盘按真实开盘价成交最近一份计划(虚盘)")
+    sub.add_parser("status", help="查看当前持仓/权益/风控状态/最近成交")
 
     args = parser.parse_args()
     {"fetch": cmd_fetch, "backtest": cmd_backtest, "sweep": cmd_sweep,
-     "plan": cmd_plan, "execute": cmd_execute}[args.command](args)
+     "plan": cmd_plan, "execute": cmd_execute, "status": cmd_status}[args.command](args)
 
 
 if __name__ == "__main__":

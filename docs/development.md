@@ -183,3 +183,19 @@
    gm 库函数内惰性导入;`plan_to_gm_orders` 纯映射有单元测试。
 
 测试 95 → 102(限价成交判定 ×4、计划执行追踪 ×2、掘金映射 ×1)。
+
+## 13. 虚盘自动化:cli status + plan 幂等守卫 + cron 日任务(2026-10-07)
+
+用户决定虚盘跑一个月后上实盘,电脑常开。补齐三样:
+
+1. **`cli status`**:每日查看现金/持仓(成本/现价/浮盈亏/移动止损锚点)/总权益/禁买名单/
+   评分连击/待执行计划/最近成交。**直接读本地 CSV 缓存(纯离线)**——首版用 fetch_universe
+   被缓存过期触发的联网刷新打死(东财限流),status 这类查看命令必须永远可用;
+2. **plan 幂等守卫 `_plan_unchanged`**:同一信号日+同一参数 → 不重复落盘。否则非交易日
+   cron 跑 plan 会把同一信号重复写日志、top_streak 被重复推进(实测 9/30 信号曾被推进
+   两次;confirm_days=1 下无害,但状态不干净);
+3. **`scripts/daily_paper.sh` + cron**:9:31 execute / 20:30 fetch+plan,日志 logs/paper.log。
+   非交易日自动跳过(execute 检测今日无 bar;plan 靠守卫)。macOS 注意:cron 需完全磁盘
+   访问权限(项目在 ~/Desktop 下),并防止到时休眠。
+
+测试 102 → 107(幂等守卫 ×4、status ×1)。

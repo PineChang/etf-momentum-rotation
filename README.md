@@ -39,8 +39,11 @@ PYTHONPATH=src python -m etf_rotation.cli plan
 # 开盘按真实开盘价成交最近一份计划(对应文章 9:30 实际交易;虚盘闭环)
 PYTHONPATH=src python -m etf_rotation.cli execute
 
+# 查看当前持仓/浮盈亏/权益/最近成交(纯离线)
+PYTHONPATH=src python -m etf_rotation.cli status
+
 # 运行测试
-PYTHONPATH=src python -m pytest tests/ -q        # 102 passed
+PYTHONPATH=src python -m pytest tests/ -q        # 107 passed
 ```
 
 也可 `pip install -e .` 后直接使用 `etf-rotation <command>`。
@@ -56,9 +59,18 @@ PYTHONPATH=src python -m pytest tests/ -q        # 102 passed
 实盘机制(文章第 4 节)见 `src/etf_rotation/live.py`:盘前计划、限价单(买×1.01/卖×0.99)、状态持久化、复利盈亏。
 
 **虚盘(模拟盘)闭环**:每晚 `cli fetch` + `cli plan` 生成计划,次日 9:30 后 `cli execute`
-按真实开盘价成交并记账(限价单开盘价未成交则整批放弃、可稍候重跑;同一计划拒绝重复执行)。
+按真实开盘价成交并记账(限价单开盘价未成交则整批放弃、可稍候重跑;同一计划拒绝重复执行;
+非交易日自动跳过)。`cli status` 随时查看持仓/浮盈亏/权益/最近成交(纯离线读缓存)。
 也可挂掘金仿真账户(sim.myquant.cn,免费免开户):`scripts/gm_paper.py` 每天 09:31 自动把
 计划单转成掘金限价单——信号始终由本仓库引擎生成,掘金只做下单通道。
+
+**全自动挂机(macOS cron)**:`scripts/daily_paper.sh morning|evening` 已封装好每日任务,
+`crontab -e` 加入下面两行即可(注意给 cron 授予完全磁盘访问权限、并防止电脑到点休眠):
+
+```cron
+31 9 * * 1-5  /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh morning
+30 20 * * *   /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh evening
+```
 
 ## 项目结构
 
@@ -75,7 +87,7 @@ etf-momentum-rotation/
 │   ├── live.py        # 实盘四机制(计划/限价单/持久化/复利)
 │   ├── sweep.py       # 参数遍历
 │   └── cli.py         # 命令行:fetch/backtest/sweep/plan
-├── tests/             # 102 个单元与集成测试(含确定性无前视检验)
+├── tests/             # 107 个单元与集成测试(含确定性无前视检验)
 ├── docs/
 │   ├── article-notes.md   # 文章知识提取(公式/参数/忠实度对照)
 │   └── development.md     # 开发过程记录
