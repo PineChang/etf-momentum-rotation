@@ -40,6 +40,7 @@ PYTHONPATH=src python -m etf_rotation.cli plan
 PYTHONPATH=src python -m etf_rotation.cli execute
 
 # 查看当前持仓/浮盈亏/权益/最近成交(纯离线)
+PYTHONPATH=src python -m etf_rotation.cli dashboard --open   # 或生成 HTML 仪表盘并打开
 PYTHONPATH=src python -m etf_rotation.cli status
 
 # 运行测试

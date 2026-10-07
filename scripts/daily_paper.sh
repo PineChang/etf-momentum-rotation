@@ -15,10 +15,12 @@ case "${1:-}" in
     echo "=== $(date '+%F %T') fetch + plan ===" >> "$LOG"
     "$PY" -m etf_rotation.cli fetch >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli plan  >> "$LOG" 2>&1
+    "$PY" -m etf_rotation.cli dashboard >> "$LOG" 2>&1
     ;;
   morning)
     echo "=== $(date '+%F %T') execute ===" >> "$LOG"
     "$PY" -m etf_rotation.cli execute >> "$LOG" 2>&1
+    "$PY" -m etf_rotation.cli dashboard >> "$LOG" 2>&1
     ;;
   *)
     echo "用法: $0 evening|morning"

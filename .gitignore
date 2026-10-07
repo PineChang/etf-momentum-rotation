@@ -16,3 +16,4 @@ state/
 
 # 虚盘运行日志
 logs/
+.gstack/

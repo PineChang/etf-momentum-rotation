@@ -219,6 +219,19 @@ def cmd_execute(args) -> None:
           f"| 累计已实现盈亏 {new_state.realized_pnl:.2f}")
 
 
+def cmd_dashboard(args) -> None:
+    """生成 HTML 虚盘仪表盘(自包含单文件,浏览器直接打开;纯离线)。"""
+    from .dashboard import render_dashboard
+
+    data = {s: pd.read_csv(DATA_DIR / f"{s}.csv", parse_dates=["date"]) for s in UNIVERSE
+            if (DATA_DIR / f"{s}.csv").exists()}
+    out = render_dashboard(StateStore(STATE_DIR), data, STATE_DIR / "dashboard.html")
+    print(f"仪表盘: {out}")
+    if args.open:
+        import subprocess
+        subprocess.run(["open", str(out)], check=False)
+
+
 def cmd_status(args) -> None:
     """每日查看:现金/持仓(浮盈亏)/权益/风控状态/待执行计划/最近成交。
 
@@ -285,9 +298,13 @@ def main() -> None:
     sub.add_parser("execute", help="开盘按真实开盘价成交最近一份计划(虚盘)")
     sub.add_parser("status", help="查看当前持仓/权益/风控状态/最近成交")
 
+    p_dash = sub.add_parser("dashboard", help="生成 HTML 虚盘仪表盘(state/dashboard.html)")
+    p_dash.add_argument("--open", action="store_true", help="生成后在浏览器打开")
+
     args = parser.parse_args()
     {"fetch": cmd_fetch, "backtest": cmd_backtest, "sweep": cmd_sweep,
-     "plan": cmd_plan, "execute": cmd_execute, "status": cmd_status}[args.command](args)
+     "plan": cmd_plan, "execute": cmd_execute, "status": cmd_status,
+     "dashboard": cmd_dashboard}[args.command](args)
 
 
 if __name__ == "__main__":
