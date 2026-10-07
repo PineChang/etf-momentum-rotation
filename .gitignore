@@ -13,3 +13,6 @@ state/
 
 # 系统文件
 .DS_Store
+
+# 虚盘运行日志
+logs/
