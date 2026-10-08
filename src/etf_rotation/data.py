@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import akshare as ak
@@ -140,7 +141,7 @@ def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
             # 与缓存不一致,说明锚点已变——直接追加会在除息日产生假跳空,
             # 必须丢弃缓存全量重拉(后复权锚定上市日,不受影响)。
             ov_start = (latest - pd.Timedelta(days=9)).strftime("%Y%m%d")
-            inc, _ = _fetch_daily(symbol, ov_start, end, adjust)
+            inc, inc_unadj = _fetch_daily(symbol, ov_start, end, adjust)
             if not inc.empty:
                 inc = _normalize(inc)
                 overlap = inc[inc["date"] <= latest].set_index("date")["close"]
@@ -156,6 +157,15 @@ def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
                             f"待东财恢复后重跑 cli fetch 会自动全量重拉。")
                     df = _normalize(fresh)
                 else:
+                    if inc_unadj:
+                        # 增量只能用未复权序列(如腾讯缺 qfqday 的 159949):重叠区是
+                        # "未复权 vs 未复权",锚点校验恒等、看不见除息——期间若除息,
+                        # 新 bar 会带着分红跳空接在旧复权价后面(凭空一根假阴线,可能
+                        # 触发假止损)。东财恢复后首次全量重拉会自动修正,故只告警不拦截。
+                        warnings.warn(
+                            f"{symbol} 增量更新只能用未复权序列(数据源缺复权序列):"
+                            f"若 {ov_start} 之后区间内发生除息,缓存将出现假跳空;"
+                            f"数据源恢复后的全量重拉会自动修正。", stacklevel=2)
                     df = pd.concat([df, inc]).drop_duplicates("date").sort_values("date").reset_index(drop=True)
                 df = _drop_partial_today(df)
                 df.to_csv(cache, index=False)

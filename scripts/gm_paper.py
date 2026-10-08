@@ -70,16 +70,36 @@ def plan_to_gm_orders(plan: dict) -> list[dict]:
 
     SELL → action="close_all"(清仓该标的,对应 order_target_percent(symbol, 0));
     BUY  → action="buy_value"(按 est_budget 金额 + limit_price 限价买入)。
+    两类都带 price:掘金限价单必须有价格,旧实现 SELL 只留 reason、把 limit_price
+    丢了,下单价为 None 会被拒单。
     """
     out = []
     for o in plan["orders"]:
         if o["action"] == "SELL":
             out.append({"action": "close_all", "symbol": _gm_symbol(o["symbol"]),
-                        "reason": o.get("reason", "")})
+                        "price": o["limit_price"], "reason": o.get("reason", "")})
         elif o["action"] == "BUY":
             out.append({"action": "buy_value", "symbol": _gm_symbol(o["symbol"]),
                         "value": o["est_budget"], "price": o["limit_price"],
                         "reason": o.get("reason", "")})
+    return out
+
+
+def sent_orders(plan: dict) -> list[dict]:
+    """本轨已发送过的、属于同一计划的订单(按 plan_date + data_asof 判重)。
+
+    判重必须读**本轨**的 gm_orders.jsonl:A 轨(cli execute)的成交写的是
+    trade_log.jsonl,而 StateStore.plan_executed 正是读它——用它判重会让 B 轨在
+    A 轨 9:31 先成交后永远跳过,B 轨不下单,"双轨对照"名存实亡。
+    """
+    if not ORDERS_LOG.exists():
+        return []
+    out = []
+    for line in ORDERS_LOG.read_text().splitlines():
+        rec = json.loads(line)
+        if (rec.get("plan_date") == plan.get("plan_date")
+                and rec.get("data_asof") == plan.get("data_asof")):
+            out.append(rec)
     return out
 
 
@@ -95,7 +115,8 @@ def write_gm_snapshot(store_dir: Path, account: dict, positions: list,
 
 
 def _log_sent_order(plan: dict, order: dict) -> None:
-    rec = {"plan_date": plan["plan_date"], "symbol": _plain_symbol(order["symbol"]),
+    rec = {"plan_date": plan["plan_date"], "data_asof": plan.get("data_asof"),
+           "symbol": _plain_symbol(order["symbol"]),
            "side": "SELL" if order["action"] == "close_all" else "BUY",
            "limit_price": order.get("price"), "est_budget": order.get("value"),
            "sent_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -118,13 +139,14 @@ def place_orders(context):
     if plan is None or not plan.get("orders"):
         print("今日计划无订单(空仓或无变化),不下单")
         return
-    if store.plan_executed(plan):
-        print(f"计划 {plan['plan_date']} 已执行过,跳过")
+    if sent_orders(plan):
+        print(f"计划 {plan['plan_date']}(信号 {plan.get('data_asof')})已送过单,跳过")
         return
     for o in plan_to_gm_orders(plan):
         if o["action"] == "close_all":
-            order_target_percent(symbol=o["symbol"], percent=0.0, order_type=OrderType_Limit)
-            print(f"SELL 清仓 {o['symbol']}  ({o['reason']})")
+            order_target_percent(symbol=o["symbol"], percent=0.0,
+                                 order_type=OrderType_Limit, price=o["price"])
+            print(f"SELL 清仓 {o['symbol']} 限价 {o['price']}  ({o['reason']})")
         else:
             order_value(symbol=o["symbol"], value=o["value"], side=OrderSide_Buy,
                         order_type=OrderType_Limit, price=o["price"])

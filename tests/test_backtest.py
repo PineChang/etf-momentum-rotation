@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from etf_rotation.backtest import _align, run_backtest
+from etf_rotation.backtest import _align, compute_target_set, run_backtest
 from etf_rotation.config import StrategyConfig
 from etf_rotation.metrics import perf_metrics
 
@@ -88,6 +88,39 @@ class TestConfirmDays:
                      .trades.iloc[0]["date"]].index[0])
         assert i3 > i1
         assert i3 - i1 == 2
+
+
+class TestInvalidScores:
+    """评分含 NaN 时的行为:短窗口数据/新加入标的会让 combined_score 整体为 NaN。"""
+
+    @staticmethod
+    def _short_data(n=20):
+        # bias 因子需要 ma_n + momentum_day = 45 根 → 20 根时三因子加权后全 NaN
+        return {"A": synth_ohlc([10 + 0.1 * i for i in range(n)]),
+                "B": synth_ohlc([10.0] * n)}
+
+    def test_all_nan_scores_do_not_crash_and_keep_positions(self):
+        """回归:旧实现在全 NaN 时 eligible.idxmax() 抛 ValueError,整条实盘计划链崩。
+
+        NaN 的含义是"算不出来"(数据不足),不是"全池无趋势"——不该清仓。
+        """
+        data = self._short_data()
+        cfg = StrategyConfig(bias_ma_n=20, momentum_day=25, slope_n=5, efficiency_n=5)
+        positions = {"A": 1000.0}
+        peaks = {"A": 10.0}
+        with pytest.warns(UserWarning, match="全池评分无效"):
+            target, _ = compute_target_set(data, 19, cfg, dict(positions), {"A": 10.0},
+                                          peaks, {}, {})
+        assert target == frozenset({"A"})      # 保持现状,不清仓
+        assert peaks["A"] >= 10.0
+
+    def test_short_data_backtest_warns_and_trades_nothing(self):
+        """warmup 不足时回测会静默输出一条平线——必须告警(而非让人以为策略无信号)。"""
+        data = self._short_data()
+        cfg = StrategyConfig(bias_ma_n=20, momentum_day=25, slope_n=5, efficiency_n=5)
+        with pytest.warns(UserWarning, match="warmup"):
+            res = run_backtest(data, cfg)
+        assert res.trades.empty
 
 
 class TestMetrics:

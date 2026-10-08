@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -51,13 +52,23 @@ class BacktestResult:
     config: StrategyConfig = field(default=None)
 
 
-def _align(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
-    """按交易日内连接对齐,保证同日可比。"""
+def common_dates(data: dict[str, pd.DataFrame]) -> list[pd.Timestamp]:
+    """股票池共有的交易日(升序,即 _align 的对齐日历)。
+
+    交集语义:只有全池都有 bar 的日子才可比。副作用:任一标的缺当日 bar
+    (停牌/数据源缺口),该日对全池消失、信号日整体回退一天——调用方需
+    自行告警(live.lagging_symbols + cli plan)。
+    """
     common = None
     for df in data.values():
         dates = set(df["date"])
         common = dates if common is None else common & dates
-    common = sorted(common)
+    return sorted(common or [])
+
+
+def _align(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """按交易日内连接对齐,保证同日可比。"""
+    common = common_dates(data)
     return {s: df[df["date"].isin(common)].reset_index(drop=True) for s, df in data.items()}
 
 
@@ -149,6 +160,15 @@ def compute_target_set(
     # select_targets 的空序列守卫,变成"全池无趋势时继续持有死扛",与 docstring
     # 的"空仓观望"及旧引擎行为相悖;同一标的的风控裁决被其他标的状态劫持)。
     eligible = candidates.loc[[s for s in candidates.index if _passes_regime_filters(s, data, t, cfg)]]
+    # 评分可能含 NaN(某标的的某因子历史不足,combined_score 整体为 NaN)。
+    # 选 top 必须用 dropna 后的视图:旧实现在全 NaN 时 eligible.idxmax() 直接抛
+    # ValueError(短窗口数据/新加入标的触发)。
+    valid = eligible.dropna()
+    if not eligible.empty and valid.empty:
+        warnings.warn(
+            f"全池评分无效(0/{len(eligible)} 只算得出)——保持现有持仓、不产生新目标。"
+            f"请检查各标的历史 bar 数是否满足 warmup(见 StrategyConfig.warmup_bars)。"
+        )
     if eligible.empty:
         target_set: set[str] = set()
     else:
@@ -163,8 +183,8 @@ def compute_target_set(
 
     # 入场确认:全空仓时,第一名须连续 confirm_days 天居首才允许建仓
     top: str | None = None
-    if not eligible.empty:
-        top = eligible.idxmax()
+    if not valid.empty:
+        top = valid.idxmax()
         top_streak[top] = top_streak.get(top, 0) + 1
         for s in list(top_streak):
             if s != top:
@@ -190,6 +210,11 @@ def run_backtest(data: dict[str, pd.DataFrame], cfg: StrategyConfig | None = Non
     data = _align(data)
     symbols = list(data)
     calendar = data[symbols[0]]["date"]
+    if len(calendar) < cfg.warmup_bars:
+        warnings.warn(
+            f"对齐后仅 {len(calendar)} 根 bar,少于 warmup 所需的 {cfg.warmup_bars} 根——"
+            f"本次回测不会产生任何信号与交易(结果是一条平线),请补足数据或调小因子窗口。"
+        )
 
     cash = cfg.initial_cash
     positions: dict[str, float] = {}     # symbol -> shares

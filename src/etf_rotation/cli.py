@@ -151,6 +151,12 @@ def cmd_plan(args) -> None:
     store = StateStore(STATE_DIR)
     state = store.load_state(cfg.initial_cash)
     plan, new_state = make_plan(data, state, cfg)
+    if plan.get("data_lag"):
+        # 交集对齐会因单只标的缺 bar 把信号日整体回退一天,而计划里只有 data_asof
+        # 一个字段能看出来——必须显式告警,否则又是"信号晚一天"的静默路径。
+        detail = "、".join(f"{s}(最新 {d})" for s, d in plan["data_lag"].items())
+        print(f"警告:信号日 {plan['data_asof']} 落后于部分标的最新 bar——{detail};"
+              f"这些标的当日缺 bar(停牌/数据源缺口),全池对齐后被回退。", file=sys.stderr)
     if _plan_unchanged(store, plan, cfg):
         print(f"信号日 {plan['data_asof']} 的计划已生成过且参数未变,跳过(避免连击重复推进)")
         return

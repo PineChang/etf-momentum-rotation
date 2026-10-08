@@ -21,12 +21,13 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import pandas as pd
 
-from .backtest import _align, compute_target_set
+from .backtest import _align, common_dates, compute_target_set
 from .config import StrategyConfig
 
 BUY_PRICE_FACTOR = 1.01    # 文章:买入限价 = 现价 * 1.01
@@ -120,6 +121,22 @@ class StateStore:
         return False
 
 
+def lagging_symbols(data: dict[str, pd.DataFrame]) -> dict[str, str]:
+    """对齐日历末日落后于该标的自身最新 bar 的标的 → {symbol: 自身最新日}。
+
+    make_plan/_align 取全池日期的**交集**:任一标的缺当日 bar(停牌、数据源缺口、
+    复权序列偏短),该日对全池消失、信号日整体回退一天,而计划里只有 data_asof
+    一个字段能看出来——这是"信号晚一天"的隐蔽通路(与缓存新鲜度无关)。
+    返回非空即说明本次信号建立在回退后的旧交易日上,调用方必须告警。
+    """
+    common = common_dates(data)
+    if not common:
+        return {}
+    aligned = common[-1]
+    return {s: str(df["date"].max().date()) for s, df in data.items()
+            if not df.empty and df["date"].max() > aligned}
+
+
 def make_plan(
     data: dict[str, pd.DataFrame],
     state: LiveState,
@@ -135,6 +152,7 @@ def make_plan(
     返回 (plan, new_state)。
     """
     cfg = cfg or StrategyConfig()
+    data_lag = lagging_symbols(data)      # 必须在 _align 之前算:交集会掩盖缺口
     data = _align(data)
     symbols = list(data)
     calendar = data[symbols[0]]["date"]
@@ -147,6 +165,16 @@ def make_plan(
         ts = pd.Timestamp(d)
         if ts in set(calendar):
             stopped_idx[sym] = int(calendar[calendar == ts].index[0])
+        else:
+            # stop 日期不在对齐日历上(该标的当日缺 bar,或数据重拉后日期消失):
+            # 无法定位 bar 序号。旧实现直接跳过该项 → 该标的禁买期被静默清除、次日
+            # 即可重买(止损-追高循环)。这里按最新 bar 保守计入(禁买期宁长不短),
+            # 并把日期改写为该 bar,避免下次再撞同一分支导致禁买期永不结束。
+            stopped_idx[sym] = t
+            warnings.warn(
+                f"{sym} 止损日 {d} 不在对齐日历中(该日全池缺 bar)——"
+                f"禁买期改自 {calendar.iloc[t].date()} 重新计算,请检查该标的的行情完整性。"
+            )
 
     # compute_target_set 会就地推进 peaks(持仓期最高收盘价)与 top_streak(评分连击)。
     # 这两个入参必须是**随后用来落盘的那一份**,否则推进结果被丢弃——
@@ -200,6 +228,7 @@ def make_plan(
     plan = {
         "plan_date": pd.Timestamp.today().strftime("%Y-%m-%d"),
         "data_asof": str(date_t.date()),
+        "data_lag": data_lag,     # 非空 = 部分标的当日缺 bar,信号日已被交集回退
         "config_note": (f"n_hold={cfg.n_hold}, trailing_stop={cfg.trailing_stop}, "
                         f"min_momentum={cfg.min_momentum}, take_profit={cfg.take_profit}"),
         "current": sorted(held),
@@ -246,8 +275,8 @@ def execute_plan(
     回测/模拟时可用开盘价;未成交的持仓按计划参考价估值。
     返回成交后的 LiveState(先卖后买,槽位等权,复利全额再投)。
 
-    本函数**不幂等**:同一份 plan 只能执行一次,重放会二次买入。卖出不在持仓中的
-    标的时直接抛错(而不是静默跳过),以免重放把账户状态改坏。
+    本函数**不幂等**:同一份 plan 只能执行一次,重放会二次买入。计划与账态不一致时
+    直接抛错(而不是静默改坏):卖出不在持仓中的标的、买入已持有的标的都会报错。
     """
     if not plan["orders"]:
         return state
@@ -271,6 +300,14 @@ def execute_plan(
             cash += proceeds - comm
             realized += proceeds - comm - h.shares * h.cost   # 盈亏累加 → 复利记账
         elif o["action"] == "BUY":
+            if sym in holdings:
+                # 旧实现直接覆盖 holdings[sym]:旧份额凭空消失、成本/移动止损锚点被
+                # 重置(账户权益缩水)。make_plan 不会生成这种单,但 execute_plan 是
+                # 券商对接点、B 轨手工路径也可能手写计划——与 SELL 一样显式报错。
+                raise ValueError(
+                    f"买入 {sym} 失败:当前已持有该标的。计划与账户状态不匹配"
+                    f"(计划可能已被执行过,或计划被手工改动过)。"
+                )
             total = cash + sum(h.shares * price_of(s) for s, h in holdings.items())
             budget = min(total / cfg.n_hold, cash)            # 槽位等权,不透支
             holdings[sym] = Holding(sym, budget * (1 - cfg.commission) / price, price, price)

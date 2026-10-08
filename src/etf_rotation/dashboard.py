@@ -196,6 +196,10 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
             for o in plan["orders"]) or "<div class='dim'>无订单(空仓/持有不变)</div>"
         plan_html = (f"<div class='plan'><b>{plan['plan_date']} 生成</b>"
                      f"<span class='dim'>(信号日 {plan['data_asof']})</span>{orders}</div>")
+        if plan.get("data_lag"):
+            lag = "、".join(f"{s} {d}" for s, d in plan["data_lag"].items())
+            plan_html += (f"<div class='dim'>⚠️ 信号日已被回退:下列标的当日缺 bar——{lag}"
+                          f"(该日行情未进入信号,检查数据源)</div>")
         for s, v in sorted(plan.get("scores", {}).items(), key=lambda x: -x[1]):
             scores_rows += f"<tr><td>{s} {UNIVERSE.get(s, '')}</td><td>{v:+.4f}</td></tr>"
         for s, st in plan.get("premium_check", {}).items():

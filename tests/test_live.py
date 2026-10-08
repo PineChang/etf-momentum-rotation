@@ -14,6 +14,7 @@ from etf_rotation.live import (
     StateStore,
     check_fillable_at_open,
     execute_plan,
+    lagging_symbols,
     make_plan,
 )
 
@@ -192,6 +193,52 @@ class TestMakePlan:
         assert plan2["orders"] == [], "连击仅 1 天,重跑一次不应建仓"
 
 
+class TestSignalDayLag:
+    """单只标的缺 bar → _align 交集把全池信号日回退一天(无任何报错)。
+
+    这是"信号晚一天"的隐蔽通路,与缓存新鲜度无关:停牌/数据源缺口都会触发,
+    而计划里只有 data_asof 一个字段能看出来。
+    """
+
+    @staticmethod
+    def _gapped():
+        full = synth([10 + 0.1 * i for i in range(30)])
+        short = synth([10 + 0.1 * i for i in range(29)])     # 缺最后一根 bar
+        return {"A": full, "B": short}
+
+    def test_lagging_symbols_detects_missing_bar(self):
+        gapped = self._gapped()
+        assert lagging_symbols(gapped) == {"A": str(gapped["A"]["date"].iloc[-1].date())}
+
+    def test_no_lag_when_aligned(self):
+        data = {"A": synth([10.0] * 30), "B": synth([20.0] * 30)}
+        assert lagging_symbols(data) == {}
+
+    def test_plan_reports_lag_and_uses_fallback_day(self):
+        gapped = self._gapped()
+        plan, _ = make_plan(gapped, LiveState(cash=100_000),
+                            StrategyConfig(bias_ma_n=5, momentum_day=10, slope_n=10, efficiency_n=10))
+        assert plan["data_lag"] == {"A": str(gapped["A"]["date"].iloc[-1].date())}
+        assert plan["data_asof"] == str(gapped["B"]["date"].iloc[-1].date())   # 信号日回退到交集末日
+
+
+class TestMakePlanRobustness:
+    def test_stopped_date_missing_from_calendar_keeps_cooldown(self):
+        """回归:止损日期不在对齐日历时,旧实现把该标的从禁买名单里静默抹掉并落盘,
+        禁买期作废、次日即可重买(止损-追高循环)。
+        """
+        full = synth([10.0] * 30)
+        short = full.iloc[:-1]                      # 该标的缺最后一根 bar → 日期被交集丢弃
+        stop_day = str(full["date"].iloc[-1].date())
+        state = LiveState(cash=0.0, stopped={"A": stop_day, "B": stop_day})
+        with pytest.warns(UserWarning, match="不在对齐日历中"):
+            _, new_state = make_plan({"A": full, "B": short}, state,
+                                     StrategyConfig(bias_ma_n=5, momentum_day=5,
+                                                    slope_n=5, efficiency_n=5))
+        # 两个标的的禁买状态都保留(缺 bar 的那个改自对齐末日重新计算,宁长不短)
+        assert set(new_state.stopped) == {"A", "B"}
+
+
 class TestExecutePlan:
     def test_first_buy_uses_cash_regression(self, data, cfg):
         """回归:空仓首日建仓必须真金白银买入(旧版 budget=0 买入 0 份)。"""
@@ -251,6 +298,15 @@ class TestExecutePlan:
         done = execute_plan(plan, ns, fills, cfg)
         with pytest.raises(ValueError, match="已被执行过"):
             execute_plan(plan, done, fills, cfg)
+
+    def test_buy_on_already_held_symbol_raises(self, cfg):
+        """回归:对已持有标的的 BUY 单,旧实现直接覆盖 holdings[sym] —— 旧份额凭空
+        消失、成本与移动止损锚点被重置(账户权益缩水)。必须与 SELL 一样显式报错。
+        """
+        state = LiveState(cash=10_000.0, holdings={"UP": Holding("UP", 1000.0, 8.0, 12.0)})
+        plan = {"orders": [{"action": "BUY", "symbol": "UP"}], "reference_prices": {"UP": 10.0}}
+        with pytest.raises(ValueError, match="已持有该标的"):
+            execute_plan(plan, state, {"UP": 10.0}, cfg)
 
 
 class TestStateStore:
@@ -345,8 +401,30 @@ class TestGmAdapterMapping:
             {"action": "BUY", "symbol": "159949", "limit_price": 1.5, "est_budget": 50000.0},
         ]}
         orders = mod.plan_to_gm_orders(plan)
-        assert orders[0] == {"action": "close_all", "symbol": "SHSE.518880", "reason": ""}
+        # SELL 也必须带 price:掘金限价单无价格会被拒(旧实现把 limit_price 丢了)
+        assert orders[0] == {"action": "close_all", "symbol": "SHSE.518880",
+                             "price": 8.5, "reason": ""}
         assert orders[1]["action"] == "buy_value" and orders[1]["symbol"] == "SHSE.513100"
         assert orders[1]["value"] == 50000.0 and orders[1]["price"] == 2.4
         assert orders[2]["symbol"] == "SZSE.159949"     # 深市前缀
         assert [o["action"] for o in orders] == ["close_all", "buy_value", "buy_value"]  # 先卖后买
+
+    def test_sent_orders_reads_own_track_log(self, tmp_path, monkeypatch):
+        """回归:B 轨判重必须读本轨 gm_orders.jsonl。
+
+        旧实现复用 StateStore.plan_executed(读 A 轨 trade_log):A 轨 9:31 成交后
+        B 轨每次都判为"已执行过"、永远不下单,"双轨并行对照"名存实亡。
+        """
+        mod = self._load()
+        monkeypatch.setattr(mod, "ORDERS_LOG", tmp_path / "gm_orders.jsonl")
+        plan = {"plan_date": "2026-10-08", "data_asof": "2026-10-08"}
+        assert mod.sent_orders(plan) == []
+        # A 轨成交记录(写在 trade_log)不应影响 B 轨判重
+        StateStore(tmp_path).append_log({"type": "fill", "plan_date": "2026-10-08",
+                                         "data_asof": "2026-10-08", "fills": []})
+        assert mod.sent_orders(plan) == []
+        # 本轨送单记录 → 命中;不同信号日不受影响
+        mod._log_sent_order(plan, {"action": "buy_value", "symbol": "SHSE.512890",
+                                   "value": 50_000.0, "price": 1.2})
+        assert len(mod.sent_orders(plan)) == 1
+        assert mod.sent_orders({"plan_date": "2026-10-09", "data_asof": "2026-10-09"}) == []

@@ -103,6 +103,18 @@ class TestFetchEtfRefresh:
         cached = pd.read_csv(self.cache_dir / "512890.csv")
         assert list(cached["close"]) == [1.0, 1.0]
 
+    def test_incremental_unadjusted_fallback_warns(self, monkeypatch):
+        """增量只能用未复权序列时必须告警:重叠区是"未复权 vs 未复权",锚点校验
+        恒等、看不见除息,期间除息会凭空插进一根假阴线(旧实现完全静默)。
+        """
+        self._write_cache(["2026-10-06", "2026-10-07"], [1.0, 1.0])
+        self._freeze_time(monkeypatch, "2026-10-08", 20)
+        src = self._src_df(["2026-10-07", "2026-10-08"], [1.0, 1.0])
+        monkeypatch.setattr(d, "_fetch_daily", lambda *a, **k: (src, True))
+        with pytest.warns(UserWarning, match="未复权序列"):
+            df = fetch_etf("512890")
+        assert df["date"].max() == pd.Timestamp("2026-10-08")   # 告警但照常更新
+
     def test_first_fetch_with_unadjusted_fallback_raises(self, monkeypatch):
         self._freeze_time(monkeypatch, "2026-10-08", 20)
         src = self._src_df(["2026-10-08"], [1.1])
