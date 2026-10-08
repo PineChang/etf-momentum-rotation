@@ -1,5 +1,7 @@
 """实盘模块测试:计划生成、限价单、V3 风控、状态持久化与重启恢复、复利盈亏。"""
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -173,6 +175,21 @@ class TestMakePlan:
         _, _, _, per_day = self._run_days(closes, cfg3, start_i=15)
         assert per_day[0] == 0, "第一天不该建仓(评分连击仅 1 天)"
         assert any(n > 0 for n in per_day[1:]), "连续第二天起应能建仓(旧版永远不建仓)"
+
+    def test_same_signal_day_replan_does_not_double_count_streak(self):
+        """回归:同一信号日重复 plan(换参数重跑/手动补跑)不得重复推进评分连击,
+        否则 confirm_days≥2 的入场确认会被虚假满足(1 天被数成 2 天)。
+        """
+        data = {"UP": synth(geom(10, 1.01, 60)), "DOWN": synth([20 - 0.1 * i for i in range(60)])}
+        cfg3 = StrategyConfig(bias_ma_n=5, momentum_day=10, slope_n=10, efficiency_n=10,
+                              commission=0.0, confirm_days=2)
+        plan1, s1 = make_plan(data, LiveState(cash=100_000), cfg3)
+        assert plan1["orders"] == [] and s1.top_streak.get("UP") == 1
+        # 同一信号日、不同参数重跑(cli 的 _plan_unchanged 拦不住这条路径)
+        cfg_rerun = replace(cfg3, take_profit=0.3)
+        plan2, s2 = make_plan(data, s1, cfg_rerun)
+        assert s2.top_streak == s1.top_streak, "同一信号日连击被重复推进"
+        assert plan2["orders"] == [], "连击仅 1 天,重跑一次不应建仓"
 
 
 class TestExecutePlan:

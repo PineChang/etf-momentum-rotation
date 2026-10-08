@@ -50,6 +50,7 @@ class LiveState:
     realized_pnl: float = 0.0                 # 历史累计已实现盈亏(复利记账,信息用)
     stopped: dict[str, str] = field(default_factory=dict)  # symbol -> 止损/止盈触发日(禁买期锚点)
     top_streak: dict[str, int] = field(default_factory=dict)  # 连续评分第一天数(入场确认)
+    last_signal: str = ""                     # 最近一次已计入连击的信号日(data_asof)
 
     def to_dict(self) -> dict:
         return {
@@ -58,6 +59,7 @@ class LiveState:
             "realized_pnl": self.realized_pnl,
             "stopped": dict(self.stopped),
             "top_streak": dict(self.top_streak),
+            "last_signal": self.last_signal,
         }
 
     @classmethod
@@ -65,7 +67,8 @@ class LiveState:
         holdings = {s: Holding(**h) for s, h in d.get("holdings", {}).items()}
         return cls(cash=d.get("cash", 0.0), holdings=holdings,
                    realized_pnl=d.get("realized_pnl", 0.0),
-                   stopped=d.get("stopped", {}), top_streak=d.get("top_streak", {}))
+                   stopped=d.get("stopped", {}), top_streak=d.get("top_streak", {}),
+                   last_signal=d.get("last_signal", ""))
 
 
 class StateStore:
@@ -150,6 +153,13 @@ def make_plan(
     # 实盘移动止损会退化为"锚定开仓价的固定止损",confirm_days 也永不生效。
     peaks = {s: h.peak for s, h in state.holdings.items()}
     streak = dict(state.top_streak)
+    signal_day = str(date_t.date())
+    if state.last_signal == signal_day:
+        # 同一信号日重复 plan(换参数重跑/手动补跑):前一次已把当日连击 +1,
+        # 先回退一格再交给引擎,使推进一次后恰好落在正确值——否则 confirm_days≥2
+        # 的入场确认会被虚假满足,连击 1 天被数成 2 天并生成建仓单。
+        # (peaks/stopped 天然幂等,无需处理。)
+        streak = {s: max(0, n - 1) for s, n in streak.items()}
     target, scores = compute_target_set(
         data, t, cfg,
         positions={s: h.shares for s, h in state.holdings.items()},
@@ -166,6 +176,7 @@ def make_plan(
         realized_pnl=state.realized_pnl,
         stopped={s: str(calendar.iloc[i].date()) for s, i in stopped_idx.items()},
         top_streak=streak,
+        last_signal=signal_day,
     )
 
     closes = {s: float(data[s]["close"].iloc[t]) for s in symbols}

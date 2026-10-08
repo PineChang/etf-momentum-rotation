@@ -1,8 +1,12 @@
 #!/bin/bash
-# 虚盘每日自动任务(配合 crontab):
-#   evening → cli fetch + cli plan   (每晚 20:30,净值公布后)
-#   morning → cli execute            (每交易日 9:31,开盘成交昨日计划)
-# 非交易日自动跳过:execute 检测"今日 bar 未生成"退出;plan 检测"信号日+参数未变"跳过。
+# 虚盘每日自动任务(配合 crontab 补跑时隙,见 README/审计报告):
+#   evening → cli fetch + cli plan + dashboard   (每晚 20:30,净值公布后;21:30 补跑时隙)
+#   morning → cli fetch + cli plan + cli execute + dashboard
+#     (每交易日 9:31;fetch+plan 是补跑——前一晚任务被睡眠错过时在这里追上,
+#      缓存已新鲜则全部自动跳过,零副作用;10:31 为崩溃重试时隙)
+# 幂等性保证补跑安全:execute 检测"计划已执行"拒绝重放;plan 检测"信号日+参数
+# 未变"跳过;fetch 检测缓存新鲜度(_needs_refresh)盘中不刷、收盘后补昨日 bar。
+# 注:macOS 上 launchd 的子进程无 ~/Desktop 读权限(TCC),cron 有——故用 cron。
 set -u
 cd "$(dirname "$0")/.."
 mkdir -p logs
@@ -18,7 +22,9 @@ case "${1:-}" in
     "$PY" -m etf_rotation.cli dashboard >> "$LOG" 2>&1
     ;;
   morning)
-    echo "=== $(date '+%F %T') execute ===" >> "$LOG"
+    echo "=== $(date '+%F %T') fetch + plan + execute ===" >> "$LOG"
+    "$PY" -m etf_rotation.cli fetch >> "$LOG" 2>&1
+    "$PY" -m etf_rotation.cli plan  >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli execute >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli dashboard >> "$LOG" 2>&1
     ;;

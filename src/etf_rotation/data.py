@@ -1,4 +1,4 @@
-"""行情数据获取与本地缓存(akshare 东方财富 ETF 日线,前复权)。
+"""行情数据获取与本地缓存(akshare 东方财富 ETF 日线,前复权;腾讯 fqkline 兜底)。
 
 缓存为 CSV:data/{symbol}.csv。首次全量下载,之后增量更新。
 """
@@ -30,10 +30,87 @@ def _fetch_em(symbol: str, start: str, end: str, adjust: str, retries: int = 4) 
             time.sleep(2 * (attempt + 1))
 
 
+def _fetch_tx(symbol: str, start: str, end: str, adjust: str) -> tuple[pd.DataFrame, bool]:
+    """腾讯 fqkline 兜底(东财断连/限流时)。start/end: YYYYMMDD。
+
+    返回 (与东财同构的 DataFrame(中文列名), 是否退回了未复权序列)。
+    部分标的的复权序列(qfqday/hfqday)在端点上缺失,只能拿到未复权 day——
+    无分红期两者数值相同,但除息后会分叉。调用方(fetch_etf)据此在锚点校验
+    不一致/首次建缓存时拒绝落盘,防止未复权序列被静默当前复权用(除息跳空
+    会被因子当成真实下跌)。
+    """
+    import time
+
+    import requests
+
+    code = ("sh" if symbol.startswith(("5", "6")) else "sz") + symbol
+    adj_key = {"qfq": "qfqday", "hfq": "hfqday"}.get(adjust, "day")
+    keys = (adj_key, "day")
+    start_d = f"{start[:4]}-{start[4:6]}-{start[6:]}"
+    end_d = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+    state = {"unadj": False}
+
+    def _get(param: str) -> list:
+        v = requests.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+                         f"?param={param}", timeout=15).json()["data"][code]
+        for k in keys:
+            if v.get(k):
+                if k == "day" and adj_key != "day":
+                    state["unadj"] = True
+                return v[k]
+        return []
+
+    rows, cur_end = [], end_d
+    for _ in range(20):  # 页数硬上限,防死循环
+        arr = _get(f"{code},day,,{cur_end},640,{adjust}")
+        if not arr:
+            break
+        rows = arr + rows
+        if arr[0][0] <= start_d:
+            break
+        cur_end = (pd.Timestamp(arr[0][0]) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        time.sleep(0.5)
+    # 大 count 的复权序列可能滞后当日 bar;小 count 走另一路缓存含当日,合并补缺
+    have = {r[0] for r in rows}
+    rows += [r for r in _get(f"{code},day,,,10,{adjust}") if r[0] not in have]
+    recs = [r[:6] for r in rows if start_d <= r[0] <= end_d]
+    df = pd.DataFrame(recs, columns=list(_COL_MAP)).drop_duplicates("日期")
+    for c in list(_COL_MAP)[1:]:
+        df[c] = pd.to_numeric(df[c])
+    return df, state["unadj"]
+
+
+def _fetch_daily(symbol: str, start: str, end: str, adjust: str) -> tuple[pd.DataFrame, bool]:
+    """东财优先,断连/限流时兜底腾讯 fqkline。返回 (df, 是否只有未复权序列)。"""
+    try:
+        return _fetch_em(symbol, start, end, adjust), False
+    except Exception:
+        return _fetch_tx(symbol, start, end, adjust)
+
+
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns=_COL_MAP)[list(_COL_MAP.values())]
     df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").reset_index(drop=True)
+
+
+def _needs_refresh(latest: pd.Timestamp, now: pd.Timestamp) -> bool:
+    """缓存是否需要增量刷新。
+
+    - 已含今日 bar:不刷;
+    - 缺昨日及更早的 bar(休眠唤醒/隔夜补跑):任何时刻都刷——那些 bar 已收盘定型;
+    - 只缺今日 bar:仅收盘后(≥16:00)刷,盘中刷会把未定型的半根 bar(收盘=最新价)
+      追加进缓存,污染当日之后的信号。
+
+    2026-10 审计修复:旧条件"落后超 4 天才刷"使正常每日运行从不刷新,
+    晚间 plan 的信号永远晚一个交易日(trade_log 实证 09-29 晚用了 09-28 数据)。
+    """
+    today = now.normalize()
+    if latest >= today:
+        return False
+    if latest < today - pd.Timedelta(days=1):
+        return True
+    return now.hour >= 16
 
 
 def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
@@ -46,19 +123,24 @@ def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
     """
     DATA_DIR.mkdir(exist_ok=True)
     cache = DATA_DIR / (f"{symbol}.csv" if adjust == "qfq" else f"{symbol}.{adjust}.csv")
-    end = end or pd.Timestamp.today().strftime("%Y%m%d")
+    now = pd.Timestamp.now()
+    today = now.normalize()
+    end = end or now.strftime("%Y%m%d")
+
+    def _drop_partial_today(df: pd.DataFrame) -> pd.DataFrame:
+        """盘中(<16:00)拉到的今日 bar 未定型,不落缓存、不进返回值。"""
+        return df if now.hour >= 16 else df[df["date"] < today]
 
     if use_cache and cache.exists():
         df = pd.read_csv(cache, parse_dates=["date"])
         latest = df["date"].max()
-        today = pd.Timestamp.today().normalize()
-        if latest < today - pd.Timedelta(days=4):  # 容忍周末/小长假
+        if _needs_refresh(latest, now):
             # 带 5 个交易日重叠增量拉取:重叠区用于校验复权锚点。
             # 前复权(qfq)在分红后整条历史价格会被数据源改写,若重叠区价格
             # 与缓存不一致,说明锚点已变——直接追加会在除息日产生假跳空,
             # 必须丢弃缓存全量重拉(后复权锚定上市日,不受影响)。
             ov_start = (latest - pd.Timedelta(days=9)).strftime("%Y%m%d")
-            inc = _fetch_em(symbol, ov_start, end, adjust)
+            inc, _ = _fetch_daily(symbol, ov_start, end, adjust)
             if not inc.empty:
                 inc = _normalize(inc)
                 overlap = inc[inc["date"] <= latest].set_index("date")["close"]
@@ -66,13 +148,23 @@ def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
                 reanchored = (not overlap.empty
                               and not np.allclose(overlap.sort_index(), cached.sort_index(), atol=1e-4))
                 if reanchored:
-                    df = _normalize(_fetch_em(symbol, start, end, adjust))
+                    fresh, unadj = _fetch_daily(symbol, start, end, adjust)
+                    if unadj:
+                        raise RuntimeError(
+                            f"{symbol} 复权锚点校验不一致,且数据源当前只提供未复权序列——"
+                            f"拒绝把未复权数据当前复权改写缓存(疑似除息致锚点变化)。"
+                            f"待东财恢复后重跑 cli fetch 会自动全量重拉。")
+                    df = _normalize(fresh)
                 else:
                     df = pd.concat([df, inc]).drop_duplicates("date").sort_values("date").reset_index(drop=True)
+                df = _drop_partial_today(df)
                 df.to_csv(cache, index=False)
         return df
 
-    df = _normalize(_fetch_em(symbol, start, end, adjust))
+    fresh, unadj = _fetch_daily(symbol, start, end, adjust)
+    if unadj:
+        raise RuntimeError(f"{symbol} 数据源当前只提供未复权序列,拒绝以其初始化 {adjust} 缓存——请稍后重试")
+    df = _drop_partial_today(_normalize(fresh))
     df.to_csv(cache, index=False)
     return df
 
@@ -168,28 +260,39 @@ def premium_status(symbols: list[str], max_lag_days: int = 1,
     return out
 
 
-def fetch_today_opens(symbols: list[str]) -> dict[str, float]:
+def fetch_today_opens(symbols: list[str], retries: int = 15, wait_s: float = 60.0) -> dict[str, float]:
     """腾讯当日日线 bar 的开盘价(9:30 集合竞价后可用),供 cli execute 成交虚盘计划。
 
-    数据源与溢价 raw 缓存一致(腾讯)。今日 bar 尚未生成(盘前/非交易日)时抛错。
+    数据源与溢价 raw 缓存一致(腾讯)。今日 bar 盘初可能延迟生成(2026-10-08 实测
+    9:31 尚无、盘中才出现),带轮询重试;重试耗尽仍无(非交易日/停牌)则抛错,
+    由调用方按"非交易日"跳过。开盘价全天不变,晚几分钟取数不影响成交语义。
     """
     import time
 
     import requests
 
     today = pd.Timestamp.today().strftime("%Y-%m-%d")
-    out = {}
-    for sym in symbols:
-        code = ("sh" if sym.startswith(("5", "6")) else "sz") + sym
-        r = requests.get("https://web.ifzq.gtimg.cn/appstock/app/kline/kline",
-                         params={"param": f"{code},day,,,2,"}, timeout=15)
-        day = r.json()["data"][code]["day"]
-        if not day or day[-1][0] != today:
-            latest = day[-1][0] if day else "无数据"
-            raise RuntimeError(f"{sym} 今日 bar 尚未生成(最新 {latest})——开盘后再执行")
-        out[sym] = float(day[-1][1])     # [date, open, close, high, low, volume]
-        time.sleep(0.3)
-    return out
+    out: dict[str, float] = {}
+    last_err = "无数据"
+    for attempt in range(retries):
+        for sym in [s for s in symbols if s not in out]:
+            code = ("sh" if sym.startswith(("5", "6")) else "sz") + sym
+            try:
+                r = requests.get("https://web.ifzq.gtimg.cn/appstock/app/kline/kline",
+                                 params={"param": f"{code},day,,,2,"}, timeout=15)
+                day = r.json()["data"][code]["day"]
+                if not day or day[-1][0] != today:
+                    last_err = f"{sym} 今日 bar 尚未生成(最新 {day[-1][0] if day else '无数据'})"
+                    continue
+                out[sym] = float(day[-1][1])     # [date, open, close, high, low, volume]
+            except Exception as e:
+                last_err = f"{sym} {e}"
+            time.sleep(0.3)
+        if len(out) == len(symbols):
+            return out
+        if attempt < retries - 1:
+            time.sleep(wait_s)
+    raise RuntimeError(f"{last_err}——非交易日或行情未开始,跳过(已重试 {retries} 次)")
 
 
 def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None:

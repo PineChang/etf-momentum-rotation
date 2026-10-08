@@ -164,6 +164,10 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
     record_equity(store, state.cash, mv)
 
     # ---- 持仓表 ----
+    trailing_stop = 0.08
+    params_f = store.dir / "params.json"
+    if params_f.exists():
+        trailing_stop = json.loads(params_f.read_text()).get("trailing_stop") or 0.08
     hold_rows = ""
     for s, h in sorted(state.holdings.items()):
         px = closes.get(s)
@@ -171,7 +175,7 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
             continue
         pnl_pct = px / h.cost - 1
         pnl_yuan = h.shares * (px - h.cost)
-        stop_line = h.peak * 0.92                       # trailing_stop=0.08
+        stop_line = h.peak * (1 - trailing_stop)
         hold_rows += (f"<tr><td>{s} {UNIVERSE.get(s, '')}</td><td>{h.shares:,.0f}</td>"
                       f"<td>{h.cost:.3f}</td><td>{px:.3f}</td>"
                       f"<td class='{_cls(pnl_pct)}'>{pnl_pct:+.2%}</td>"

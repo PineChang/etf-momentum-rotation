@@ -195,15 +195,20 @@ def cmd_execute(args) -> None:
         cfg = StrategyConfig(**PRESETS["v3.1"])
 
     try:
-        open_prices = fetch_today_opens(list(UNIVERSE))
+        # 只拉计划订单涉及的开盘价:无关标的停牌/行情延迟不应中止整批执行;
+        # 持仓估值兜底用计划参考价(execute_plan 的 price_of 语义)。
+        order_syms = sorted({o["symbol"] for o in plan["orders"]})
+        open_prices = fetch_today_opens(order_syms)
     except Exception as e:
-        print(f"今日无法执行({e})——非交易日或行情未开始,跳过")
+        print(f"今日无法执行({e})")
         return
     problems = check_fillable_at_open(plan, open_prices)
     if problems:
         print("以下限价单在开盘价未成交,本次整批不执行(可稍候重跑):")
         for p in problems:
             print(" -", p)
+        store.append_log({"type": "skip", "plan_date": plan["plan_date"],
+                          "data_asof": plan["data_asof"], "problems": problems})
         return
 
     state = store.load_state(cfg.initial_cash)
@@ -211,10 +216,13 @@ def cmd_execute(args) -> None:
     store.save_state(new_state)
     fills = [{**o, "fill_price": open_prices[o["symbol"]]} for o in plan["orders"]]
     store.append_log({"type": "fill", "plan_date": plan["plan_date"],
-                      "data_asof": plan["data_asof"], "fills": fills})
+                      "data_asof": plan["data_asof"], "signal_age_days": age, "fills": fills})
     print(f"已按今日开盘价成交 {len(fills)} 笔:")
     for f in fills:
         print(f"  {f['action']} {f['symbol']} @ {f['fill_price']}  (限价 {f['limit_price']})")
+    if age > 0:
+        print(f"注:该计划生成于 {age} 天前,限价由彼时信号日收盘推导,今日开盘价成交——"
+              f"与真实限价单的持续挂单行为可能有偏差(已记录 signal_age_days)")
     print(f"现金 {new_state.cash:.2f} | 持仓 {sorted(new_state.holdings) or '空仓'} "
           f"| 累计已实现盈亏 {new_state.realized_pnl:.2f}")
 
