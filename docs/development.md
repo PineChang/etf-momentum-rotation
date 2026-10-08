@@ -195,8 +195,13 @@
    cron 跑 plan 会把同一信号重复写日志、top_streak 被重复推进(实测 9/30 信号曾被推进
    两次;confirm_days=1 下无害,但状态不干净);
 3. **`scripts/daily_paper.sh` + cron**:9:31 execute / 20:30 fetch+plan,日志 logs/paper.log。
-   非交易日自动跳过(execute 检测今日无 bar;plan 靠守卫)。macOS 注意:cron 需完全磁盘
-   访问权限(项目在 ~/Desktop 下),并防止到时休眠。
+   非交易日自动跳过(execute 检测今日无 bar;plan 靠守卫)。防止到时休眠。
+   **2026-10-08 审计后改为补跑时隙版**(先试 launchd 失败:其子进程无 ~/Desktop 读权限
+   ——macOS TCC `kTCCServiceSystemPolicyDesktopFolder`,授权需给 /bin/bash 完全磁盘访问、
+   过宽;实测 cron 天然可读 Desktop,无需授权):
+   - morning(9:31,10:31 补跑时隙)= fetch + plan + execute + dashboard——前一晚任务
+     被睡眠错过时在此自动补上,缓存新鲜则各步幂等跳过、零副作用;
+   - evening(20:30,21:30 补跑时隙)= fetch + plan + dashboard。
 
 测试 102 → 107(幂等守卫 ×4、status ×1)。
 

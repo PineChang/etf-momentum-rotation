@@ -71,12 +71,19 @@ PYTHONPATH=src python -m pytest tests/ -q        # 107 passed
 Linux/Docker/云主机用户可直接挂 `scripts/gm_paper.py --token <token>` 全自动送单+同步。
 
 **全自动挂机(macOS cron)**:`scripts/daily_paper.sh morning|evening` 已封装好每日任务,
-`crontab -e` 加入下面两行即可(注意给 cron 授予完全磁盘访问权限、并防止电脑到点休眠):
+`crontab -e` 加入下面四行即可(防止电脑到点休眠)。morning 含 fetch+plan+execute:
+前一晚任务被睡眠错过时在这里自动补上(幂等守卫保证重复跑零副作用),10:31 / 21:30
+为崩溃重试的补跑时隙:
 
 ```cron
-31 9 * * 1-5  /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh morning
-30 20 * * *   /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh evening
+31 9  * * 1-5  /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh morning
+31 10 * * 1-5  /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh morning
+30 20 * * *    /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh evening
+30 21 * * *    /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh evening
 ```
+
+> 注:选 cron 而非 launchd 是实测结论——launchd 子进程无 ~/Desktop 读权限
+> (macOS TCC),cron 有,无需额外授权。
 
 ## 项目结构
 
