@@ -106,6 +106,13 @@ def _passes_entry_gates(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg:
         prem = data[symbol]["premium"].iloc[t]
         if pd.notna(prem) and prem > cfg.premium_max:
             return False
+    if cfg.premium_window is not None and "premium" in data[symbol]:
+        s = data[symbol]["premium"].iloc[: t + 1]
+        prem = s.iloc[-1]
+        # 均值取前 N 个交易日(不含当日),历史不足 N 天视为无数据放行
+        base = s.iloc[:-1].rolling(cfg.premium_window).mean().iloc[-1] if len(s) > 1 else None
+        if prem is not None and pd.notna(prem) and base is not None and pd.notna(base) and prem > base:
+            return False
     return True
 
 

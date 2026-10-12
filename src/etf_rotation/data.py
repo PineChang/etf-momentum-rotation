@@ -1,10 +1,11 @@
-"""行情数据获取与本地缓存(akshare 东方财富 ETF 日线,前复权;腾讯 fqkline 兜底)。
+"""行情数据获取与本地缓存(tushare 中转站 ETF 日线为首选,东财 akshare 兜底,前复权)。
 
 缓存为 CSV:data/{symbol}.csv。首次全量下载,之后增量更新。
 """
 
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 
@@ -15,6 +16,80 @@ import pandas as pd
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 _COL_MAP = {"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume"}
+
+
+def _load_ts_token() -> str | None:
+    """tushare 中转站 token:优先环境变量 TUSHARE_RELAY_TOKEN,否则读项目根 .env。"""
+    token = os.environ.get("TUSHARE_RELAY_TOKEN")
+    if token:
+        return token
+    env_f = Path(__file__).resolve().parents[2] / ".env"
+    if env_f.exists():
+        for line in env_f.read_text().splitlines():
+            if line.startswith("TUSHARE_RELAY_TOKEN="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+def _ts_pro():
+    import tushare as ts
+
+    token = _load_ts_token()
+    if not token:
+        raise RuntimeError("未配置 TUSHARE_RELAY_TOKEN(环境变量或项目根 .env)")
+    pro = ts.pro_api(token, timeout=30)
+    pro._DataApi__http_url = "https://tl.kaixin8.top/tushare/sdk"
+    return pro
+
+
+def _ts_code(symbol: str) -> str:
+    return symbol + (".SH" if symbol.startswith(("5", "6")) else ".SZ")
+
+
+def _fetch_ts(symbol: str, start: str, end: str, adjust: str, retries: int = 4) -> pd.DataFrame:
+    """tushare 中转站 ETF 日线(首选数据源,2026-10-12 起)。
+
+    fund_daily 为交易所原始价(3 位小数,与富途/支付宝逐分一致,实证 512890
+    10-09 收 1.208);qfq/hfq 用 fund_adj 复权因子自行计算并保留 3 位小数,
+    与东财缓存口径一致(重叠区实证逐分不差,不触发锚点重拉)。复权因子自行
+    计算意味着永不退回未复权序列——因子缺失直接抛错走兜底,不静默放行。
+    中转站上游池偶发限流(upstream_pool_exhausted,文档建议等 30s),带重试。
+    """
+    import time
+
+    pro = _ts_pro()
+    ts_code = _ts_code(symbol)
+    for attempt in range(retries):
+        try:
+            daily = pro.fund_daily(ts_code=ts_code, start_date=start, end_date=end,
+                                   fields="trade_date,open,high,low,close,vol")
+            if daily.empty:
+                return pd.DataFrame(columns=list(_COL_MAP))
+            k = 1.0
+            if adjust in ("qfq", "hfq"):
+                adj = pro.fund_adj(ts_code=ts_code, start_date=start, end_date=end,
+                                   fields="trade_date,adj_factor")
+                if adj.empty:
+                    raise RuntimeError(f"{symbol} fund_adj 复权因子为空,无法计算 {adjust}")
+                daily = daily.merge(adj, on="trade_date", how="left")
+                if daily["adj_factor"].isna().any():
+                    raise RuntimeError(f"{symbol} fund_adj 复权因子缺交易日,无法计算 {adjust}")
+                f = daily["adj_factor"]
+                # qfq 锚定窗口最新交易日因子(窗口 end=今日,即全局最新锚点)
+                k = f / f[daily["trade_date"].idxmax()] if adjust == "qfq" else f
+            return pd.DataFrame({
+                "日期": daily["trade_date"],
+                "开盘": (daily["open"] * k).round(3),
+                "收盘": (daily["close"] * k).round(3),
+                "最高": (daily["high"] * k).round(3),
+                "最低": (daily["low"] * k).round(3),
+                "成交量": daily["vol"],
+            })
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            # 上游池耗尽按文档等 30s;其余断连/超时短退避
+            time.sleep(30 if "pool_exhausted" in str(e) else 2 * (attempt + 1))
 
 
 def _fetch_em(symbol: str, start: str, end: str, adjust: str, retries: int = 4) -> pd.DataFrame:
@@ -31,62 +106,21 @@ def _fetch_em(symbol: str, start: str, end: str, adjust: str, retries: int = 4) 
             time.sleep(2 * (attempt + 1))
 
 
-def _fetch_tx(symbol: str, start: str, end: str, adjust: str) -> tuple[pd.DataFrame, bool]:
-    """腾讯 fqkline 兜底(东财断连/限流时)。start/end: YYYYMMDD。
+def _fetch_daily(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
+    """tushare 中转站优先(交易所原始精度);断连/限流时兜底东财。
 
-    返回 (与东财同构的 DataFrame(中文列名), 是否退回了未复权序列)。
-    部分标的的复权序列(qfqday/hfqday)在端点上缺失,只能拿到未复权 day——
-    无分红期两者数值相同,但除息后会分叉。调用方(fetch_etf)据此在锚点校验
-    不一致/首次建缓存时拒绝落盘,防止未复权序列被静默当前复权用(除息跳空
-    会被因子当成真实下跌)。
+    2026-10-12 起移除腾讯兜底:腾讯 fqkline 会把最新 bar 圆整到 2 位小数
+    (512890 真实收 1.208 被写成 1.21),违反"与交易所精确相等"的硬要求。
+    两源均失败时抛错,由 cron 下一时隙重试,不写入可疑数据。
     """
-    import time
-
-    import requests
-
-    code = ("sh" if symbol.startswith(("5", "6")) else "sz") + symbol
-    adj_key = {"qfq": "qfqday", "hfq": "hfqday"}.get(adjust, "day")
-    keys = (adj_key, "day")
-    start_d = f"{start[:4]}-{start[4:6]}-{start[6:]}"
-    end_d = f"{end[:4]}-{end[4:6]}-{end[6:]}"
-    state = {"unadj": False}
-
-    def _get(param: str) -> list:
-        v = requests.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-                         f"?param={param}", timeout=15).json()["data"][code]
-        for k in keys:
-            if v.get(k):
-                if k == "day" and adj_key != "day":
-                    state["unadj"] = True
-                return v[k]
-        return []
-
-    rows, cur_end = [], end_d
-    for _ in range(20):  # 页数硬上限,防死循环
-        arr = _get(f"{code},day,,{cur_end},640,{adjust}")
-        if not arr:
-            break
-        rows = arr + rows
-        if arr[0][0] <= start_d:
-            break
-        cur_end = (pd.Timestamp(arr[0][0]) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        time.sleep(0.5)
-    # 大 count 的复权序列可能滞后当日 bar;小 count 走另一路缓存含当日,合并补缺
-    have = {r[0] for r in rows}
-    rows += [r for r in _get(f"{code},day,,,10,{adjust}") if r[0] not in have]
-    recs = [r[:6] for r in rows if start_d <= r[0] <= end_d]
-    df = pd.DataFrame(recs, columns=list(_COL_MAP)).drop_duplicates("日期")
-    for c in list(_COL_MAP)[1:]:
-        df[c] = pd.to_numeric(df[c])
-    return df, state["unadj"]
-
-
-def _fetch_daily(symbol: str, start: str, end: str, adjust: str) -> tuple[pd.DataFrame, bool]:
-    """东财优先,断连/限流时兜底腾讯 fqkline。返回 (df, 是否只有未复权序列)。"""
     try:
-        return _fetch_em(symbol, start, end, adjust), False
-    except Exception:
-        return _fetch_tx(symbol, start, end, adjust)
+        df = _fetch_ts(symbol, start, end, adjust)
+        if not df.empty:
+            return df
+        warnings.warn(f"{symbol} tushare 中转站返回空,回退东财。", stacklevel=2)
+    except Exception as e:
+        warnings.warn(f"{symbol} tushare 中转站取数失败({e}),回退东财。", stacklevel=2)
+    return _fetch_em(symbol, start, end, adjust)
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -112,6 +146,33 @@ def _needs_refresh(latest: pd.Timestamp, now: pd.Timestamp) -> bool:
     if latest < today - pd.Timedelta(days=1):
         return True
     return now.hour >= 16
+
+
+def _drop_rounded_latest(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """丢弃被数据源圆整到 2 位小数的最新 bar(2026-10-09 实证:腾讯兜底把
+    512890 真实收 1.208 写成 1.21、518880 真实收 8.617 写成 8.62;ETF 最小
+    价位 0.001,真实 4 价恰好全是 0.01 整数倍的概率约 1e-4)。
+
+    判定:最新行开/收/高/低全部等于自身保留 2 位小数的值,且近 5 行历史
+    存在 3 位小数精度(排除整段历史本就 2 位精度的标的)。命中则丢弃该行
+    并告警——缓存停留前一交易日,plan 走 data_lag 告警,下次运行自动重试,
+    且该 bar 次日进入重叠区后会被正常并入(检查只针对最后一行)。
+    """
+    if len(df) < 3:
+        return df
+    ohlc = ["open", "close", "high", "low"]
+    last = df.iloc[-1][ohlc].astype(float)
+    hist = df.iloc[-6:-1][ohlc].astype(float)
+    last_rounded = bool(np.isclose(last, last.round(2)).all())
+    hist_precise = bool((~np.isclose(hist, hist.round(2))).any(axis=None))
+    if last_rounded and hist_precise:
+        warnings.warn(
+            f"{symbol} 最新 bar({df['date'].iloc[-1].date()})价格疑似被数据源"
+            f"圆整到 2 位小数(开{last['open']}/收{last['close']}/高{last['high']}"
+            f"/低{last['low']}),与真实成交价不符——已丢弃该行,缓存停留前一交易日,"
+            f"待数据源给出精确值后自动补上。", stacklevel=2)
+        return df.iloc[:-1].reset_index(drop=True)
+    return df
 
 
 def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
@@ -141,7 +202,7 @@ def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
             # 与缓存不一致,说明锚点已变——直接追加会在除息日产生假跳空,
             # 必须丢弃缓存全量重拉(后复权锚定上市日,不受影响)。
             ov_start = (latest - pd.Timedelta(days=9)).strftime("%Y%m%d")
-            inc, inc_unadj = _fetch_daily(symbol, ov_start, end, adjust)
+            inc = _fetch_daily(symbol, ov_start, end, adjust)
             if not inc.empty:
                 inc = _normalize(inc)
                 overlap = inc[inc["date"] <= latest].set_index("date")["close"]
@@ -149,32 +210,16 @@ def fetch_etf(symbol: str, start: str = "20190101", end: str | None = None,
                 reanchored = (not overlap.empty
                               and not np.allclose(overlap.sort_index(), cached.sort_index(), atol=1e-4))
                 if reanchored:
-                    fresh, unadj = _fetch_daily(symbol, start, end, adjust)
-                    if unadj:
-                        raise RuntimeError(
-                            f"{symbol} 复权锚点校验不一致,且数据源当前只提供未复权序列——"
-                            f"拒绝把未复权数据当前复权改写缓存(疑似除息致锚点变化)。"
-                            f"待东财恢复后重跑 cli fetch 会自动全量重拉。")
-                    df = _normalize(fresh)
+                    df = _normalize(_fetch_daily(symbol, start, end, adjust))
                 else:
-                    if inc_unadj:
-                        # 增量只能用未复权序列(如腾讯缺 qfqday 的 159949):重叠区是
-                        # "未复权 vs 未复权",锚点校验恒等、看不见除息——期间若除息,
-                        # 新 bar 会带着分红跳空接在旧复权价后面(凭空一根假阴线,可能
-                        # 触发假止损)。东财恢复后首次全量重拉会自动修正,故只告警不拦截。
-                        warnings.warn(
-                            f"{symbol} 增量更新只能用未复权序列(数据源缺复权序列):"
-                            f"若 {ov_start} 之后区间内发生除息,缓存将出现假跳空;"
-                            f"数据源恢复后的全量重拉会自动修正。", stacklevel=2)
                     df = pd.concat([df, inc]).drop_duplicates("date").sort_values("date").reset_index(drop=True)
                 df = _drop_partial_today(df)
+                df = _drop_rounded_latest(df, symbol)
                 df.to_csv(cache, index=False)
         return df
 
-    fresh, unadj = _fetch_daily(symbol, start, end, adjust)
-    if unadj:
-        raise RuntimeError(f"{symbol} 数据源当前只提供未复权序列,拒绝以其初始化 {adjust} 缓存——请稍后重试")
-    df = _drop_partial_today(_normalize(fresh))
+    fresh = _fetch_daily(symbol, start, end, adjust)
+    df = _drop_rounded_latest(_drop_partial_today(_normalize(fresh)), symbol)
     df.to_csv(cache, index=False)
     return df
 
@@ -193,7 +238,7 @@ def fetch_universe(symbols: list[str], start: str = "20190101", adjust: str = "q
 def fetch_premium(symbol: str) -> pd.Series:
     """溢价率序列(index=date):未复权收盘 / 单位净值 - 1。
 
-    依赖缓存 data/{symbol}.raw.csv(腾讯未复权日线)与 {symbol}.nav.csv(东财单位净值),
+    依赖缓存 data/{symbol}.raw.csv(tushare 未复权日线)与 {symbol}.nav.csv(东财单位净值),
     由 scripts/eval_zhihu.py 抓取。任一缺失时返回空序列(调用方按无数据处理)。
 
     严格 PIT:信号日 t 收盘做决策时,当日净值(t 晚间)尚未公布,故每个交易日
@@ -271,30 +316,33 @@ def premium_status(symbols: list[str], max_lag_days: int = 1,
 
 
 def fetch_today_opens(symbols: list[str], retries: int = 15, wait_s: float = 60.0) -> dict[str, float]:
-    """腾讯当日日线 bar 的开盘价(9:30 集合竞价后可用),供 cli execute 成交虚盘计划。
+    """tushare rt_k 实时日线 bar 的开盘价(9:25 集合竞价后可用),供 cli execute 成交虚盘计划。
 
-    数据源与溢价 raw 缓存一致(腾讯)。今日 bar 盘初可能延迟生成(2026-10-08 实测
-    9:31 尚无、盘中才出现),带轮询重试;重试耗尽仍无(非交易日/停牌)则抛错,
-    由调用方按"非交易日"跳过。开盘价全天不变,晚几分钟取数不影响成交语义。
+    盘初实时 bar 可能延迟生成,以 trade_time 是否为今日判定;带轮询重试,
+    重试耗尽仍无(非交易日/停牌)则抛错,由调用方按"非交易日"跳过。
+    开盘价全天不变,晚几分钟取数不影响成交语义。
     """
     import time
-
-    import requests
 
     today = pd.Timestamp.today().strftime("%Y-%m-%d")
     out: dict[str, float] = {}
     last_err = "无数据"
     for attempt in range(retries):
         for sym in [s for s in symbols if s not in out]:
-            code = ("sh" if sym.startswith(("5", "6")) else "sz") + sym
             try:
-                r = requests.get("https://web.ifzq.gtimg.cn/appstock/app/kline/kline",
-                                 params={"param": f"{code},day,,,2,"}, timeout=15)
-                day = r.json()["data"][code]["day"]
-                if not day or day[-1][0] != today:
-                    last_err = f"{sym} 今日 bar 尚未生成(最新 {day[-1][0] if day else '无数据'})"
+                df = _ts_pro().rt_k(ts_code=_ts_code(sym),
+                                    fields="ts_code,open,trade_time")
+                row = df.iloc[0]
+                open_px = float(row["open"])
+                # open≤0/NaN:trade_time 已滚到今日但竞价未撮合(9:15–9:25 时隙),
+                # 不能把 0 当成成交价写虚盘
+                if not str(row["trade_time"]).startswith(today):
+                    last_err = f"{sym} 今日 bar 尚未生成(最新 {row['trade_time']})"
                     continue
-                out[sym] = float(day[-1][1])     # [date, open, close, high, low, volume]
+                if not open_px > 0:
+                    last_err = f"{sym} 今日开盘价无效({row['open']}),竞价或数据源未就绪"
+                    continue
+                out[sym] = open_px
             except Exception as e:
                 last_err = f"{sym} {e}"
             time.sleep(0.3)
@@ -306,7 +354,7 @@ def fetch_today_opens(symbols: list[str], retries: int = 15, wait_s: float = 60.
 
 
 def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None:
-    """全量刷新溢价数据源缓存:{sym}.raw.csv(腾讯未复权收盘)+ {sym}.nav.csv(东财单位净值)。
+    """全量刷新溢价数据源缓存:{sym}.raw.csv(tushare 未复权收盘)+ {sym}.nav.csv(东财单位净值)。
 
     全量重拉而非增量:净值历史可能被数据源修订(尤其 QDII),全量最干净。
     东财接口偶发限流,带重试与间隔。
@@ -314,27 +362,17 @@ def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None
     import time
 
     import akshare as ak
-    import requests
 
     end = pd.Timestamp.today().strftime("%Y-%m-%d")
     DATA_DIR.mkdir(exist_ok=True)
     for sym in symbols:
-        # 未复权日线(腾讯,分页 640)
-        code = ("sh" if sym.startswith(("5", "6")) else "sz") + sym
-        rows, cur_end = [], end
-        for _ in range(20):  # 页数硬上限,防死循环
-            url = ("https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
-                   f"?param={code},day,,{cur_end},640")
-            arr = requests.get(url, timeout=15).json()["data"][code]["day"]
-            if not arr:
-                break
-            rows = arr + rows
-            first = arr[0][0]
-            if first <= start:
-                break
-            cur_end = (pd.Timestamp(first) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-            time.sleep(0.5)
-        recs = [(r[0], float(r[2])) for r in rows if start <= r[0] <= end]
+        # 未复权日线(tushare 中转站 fund_daily,交易所原始精度;失败直接抛错,
+        # 不写可疑数据——腾讯源会把最新 bar 圆整到 2 位小数,已于 2026-10-12 移除)
+        raw_ts = _fetch_ts(sym, start.replace("-", ""), end.replace("-", ""), "")
+        if raw_ts.empty:
+            raise RuntimeError(f"{sym} tushare 未复权收盘返回空")
+        recs = [(f"{d[:4]}-{d[4:6]}-{d[6:]}", float(c))
+                for d, c in zip(raw_ts["日期"], raw_ts["收盘"])]
         raw = pd.DataFrame(recs, columns=["date", "close"]).drop_duplicates("date")
         raw.sort_values("date").to_csv(DATA_DIR / f"{sym}.raw.csv", index=False)
 

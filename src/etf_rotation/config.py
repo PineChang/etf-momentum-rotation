@@ -53,6 +53,8 @@ class StrategyConfig:
     drop_filter: bool = False           # ③ 急跌过滤:近 5 日出现单日-5%或连跌且累计-5%的标的不买
     premium_max: float | None = None    # ② 溢价率上限:开仓前安检,未复权收盘/单位净值 - 1 超过该值不买
                                         #    (需行情 df 带 premium 列,实验脚本注入;None = 关闭)
+    premium_window: int | None = None   # ②b 相对溢价安检:当日溢价 > 前 N 个交易日溢价均值则不买
+                                        #    (均值不含当日,2026-10 起替代固定 7% 门槛的实验规则;None = 关闭)
 
     # warmup 所需最少历史 bar 数
     @property

@@ -76,14 +76,16 @@ Linux/Docker/云主机用户可直接挂 `scripts/gm_paper.py --token <token>` �
 为崩溃重试的补跑时隙:
 
 ```cron
-31 9  * * 1-5  /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh morning
-31 10 * * 1-5  /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh morning
-30 20 * * *    /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh evening
-30 21 * * *    /Users/apple/Desktop/AIExp/etf-momentum-rotation/scripts/daily_paper.sh evening
+31 9  * * 1-5  /Users/apple/Desktop/AIExp/ETF/etf-momentum-rotation/scripts/daily_paper.sh morning
+31 10 * * 1-5  /Users/apple/Desktop/AIExp/ETF/etf-momentum-rotation/scripts/daily_paper.sh morning
+30 20 * * *    /Users/apple/Desktop/AIExp/ETF/etf-momentum-rotation/scripts/daily_paper.sh evening
+30 21 * * *    /Users/apple/Desktop/AIExp/ETF/etf-momentum-rotation/scripts/daily_paper.sh evening
 ```
 
 > 注:选 cron 而非 launchd 是实测结论——launchd 子进程无 ~/Desktop 读权限
-> (macOS TCC),cron 有,无需额外授权。
+> (macOS TCC),cron 有,无需额外授权。cron 不会唤醒睡眠中的 Mac,需配一个
+> 工作日定时唤醒(morning 自带补跑,早醒一次即可兜住全天):
+> `sudo pmset repeat wakeorpoweron MTWRF 09:25:00`
 
 ## 项目结构
 

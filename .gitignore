@@ -17,3 +17,6 @@ state/
 # 虚盘运行日志
 logs/
 .gstack/
+
+# tushare 中转站 token
+.env

@@ -176,7 +176,7 @@ def cmd_plan(args) -> None:
 def cmd_execute(args) -> None:
     """开盘执行最近一份计划(对应文章 9:30 实际交易;虚盘/实盘共用)。
 
-    拉取今日开盘价(腾讯),校验限价单可成交后调 execute_plan 落账。
+    拉取今日开盘价(tushare rt_k),校验限价单可成交后调 execute_plan 落账。
     整批执行或整批放弃:任一限价单开盘未成交则本次不动,稍后重跑即可
     (限价单盘中仍可能成交)。同一份计划拒绝重复执行(execute_plan 非幂等)。
     """
