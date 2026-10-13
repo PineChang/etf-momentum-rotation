@@ -354,9 +354,10 @@ def fetch_today_opens(symbols: list[str], retries: int = 15, wait_s: float = 60.
 
 
 def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None:
-    """全量刷新溢价数据源缓存:{sym}.raw.csv(tushare 未复权收盘)+ {sym}.nav.csv(东财单位净值)。
+    """刷新溢价数据源缓存:{sym}.raw.csv(tushare 未复权收盘,重叠增量)+ {sym}.nav.csv(东财单位净值,全量)。
 
-    全量重拉而非增量:净值历史可能被数据源修订(尤其 QDII),全量最干净。
+    nav 全量重拉而非增量:净值历史可能被数据源修订(尤其 QDII),全量最干净;
+    raw 收盘价不会被修订,且中转站扛不住全历史单拉,走增量。
     东财接口偶发限流,带重试与间隔。
     """
     import time
@@ -366,15 +367,39 @@ def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None
     end = pd.Timestamp.today().strftime("%Y-%m-%d")
     DATA_DIR.mkdir(exist_ok=True)
     for sym in symbols:
-        # 未复权日线(tushare 中转站 fund_daily,交易所原始精度;失败直接抛错,
-        # 不写可疑数据——腾讯源会把最新 bar 圆整到 2 位小数,已于 2026-10-12 移除)
-        raw_ts = _fetch_ts(sym, start.replace("-", ""), end.replace("-", ""), "")
-        if raw_ts.empty:
-            raise RuntimeError(f"{sym} tushare 未复权收盘返回空")
-        recs = [(f"{d[:4]}-{d[4:6]}-{d[6:]}", float(c))
-                for d, c in zip(raw_ts["日期"], raw_ts["收盘"])]
-        raw = pd.DataFrame(recs, columns=["date", "close"]).drop_duplicates("date")
-        raw.sort_values("date").to_csv(DATA_DIR / f"{sym}.raw.csv", index=False)
+        # 未复权收盘(tushare fund_daily,交易所原始精度;失败直接抛错,不写可疑数据)。
+        # 中转站上游池扛不住全历史单拉(2026-10-13 实测 ~1900 行必 pool_exhausted,
+        # 小窗口正常):有缓存走 9 天重叠增量(交易所收盘价不会被修订,增量安全),
+        # 无缓存按年分块重建。
+        raw_f = DATA_DIR / f"{sym}.raw.csv"
+        if raw_f.exists():
+            old = pd.read_csv(raw_f)
+            win_start = (pd.Timestamp(old["date"].max()) - pd.Timedelta(days=9)).strftime("%Y%m%d")
+            inc = _fetch_ts(sym, win_start, end.replace("-", ""), "")
+            if inc.empty:
+                warnings.warn(f"{sym} tushare 未复权收盘增量为空,raw 缓存停留旧值。", stacklevel=2)
+                raw = old
+            else:
+                new = pd.DataFrame({
+                    "date": [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in inc["日期"]],
+                    "close": inc["收盘"].astype(float),
+                })
+                raw = pd.concat([old, new]).drop_duplicates("date").sort_values("date")
+        else:
+            parts = []
+            for y in range(int(start[:4]), int(end[:4]) + 1):
+                chunk = _fetch_ts(sym, f"{y}0101",
+                                  end.replace("-", "") if y == int(end[:4]) else f"{y}1231", "")
+                if not chunk.empty:
+                    parts.append(pd.DataFrame({
+                        "date": [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in chunk["日期"]],
+                        "close": chunk["收盘"].astype(float),
+                    }))
+                time.sleep(1)
+            if not parts:
+                raise RuntimeError(f"{sym} tushare 未复权收盘返回空")
+            raw = pd.concat(parts).drop_duplicates("date").sort_values("date")
+        raw.to_csv(raw_f, index=False)
 
         # 单位净值(东财,带重试)
         last_err = None
