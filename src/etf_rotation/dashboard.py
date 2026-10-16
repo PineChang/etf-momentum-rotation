@@ -64,17 +64,54 @@ def record_equity(store: StateStore, cash: float, market_value: float) -> None:
     f.write_text("date,cash,market_value,total\n" + "\n".join(rows) + "\n")
 
 
+def _bench_nav(store: StateStore, start: pd.Timestamp) -> pd.Series | None:
+    """沪深300 基准净值序列(归一到 start 起 1.0);无缓存或覆盖不足返回 None。"""
+    from .data import DATA_DIR
+
+    f = DATA_DIR / "000300.bench.csv"
+    if not f.exists():
+        return None
+    df = pd.read_csv(f, parse_dates=["date"])
+    s = df[df["date"] >= start].set_index("date")["close"]
+    if len(s) < 2:
+        return None
+    return s / s.iloc[0]
+
+
 def _equity_chart(store: StateStore) -> str:
-    """净值曲线 → base64 PNG;不足 2 个点时返回空串。"""
+    """净值曲线(策略 vs 沪深300)+ 回撤对比 → base64 PNG;不足 2 个点时返回空串。"""
     f = store.dir / "equity.csv"
     if not f.exists() or len(f.read_text().splitlines()) < 3:
         return ""
     df = pd.read_csv(f, parse_dates=["date"])
-    base = df["total"].iloc[0]
-    fig, ax = plt.subplots(figsize=(10, 3.2))
-    ax.plot(df["date"], df["total"] / base, lw=1.8, color="#c0392b")
+    nav = df.set_index("date")["total"]
+    nav = nav / nav.iloc[0]
+    bench = _bench_nav(store, df["date"].iloc[0])
+    has_bench = bench is not None
+
+    fig, axes = plt.subplots(
+        2 if has_bench else 1, 1, sharex=has_bench, squeeze=False,
+        figsize=(10, 5.6 if has_bench else 3.2),
+        gridspec_kw={"height_ratios": [2, 1]} if has_bench else None)
+    ax = axes[0][0]
+    ax.plot(nav.index, nav.values, lw=1.8, color="#c0392b", label="策略")
+    if has_bench:
+        ax.plot(bench.index, bench.values, lw=1.4, color="#8a94a0", label="沪深300")
+        ax.legend(loc="upper left", frameon=False)
+        ax.set_title(f"虚盘净值 vs 沪深300(起点 {df['date'].iloc[0].date()} = 1.0)")
+        ax2 = axes[1][0]
+        dd = nav / nav.cummax() - 1
+        bdd = bench / bench.cummax() - 1
+        ax2.plot(dd.index, dd.values, lw=1.4, color="#c0392b", label="策略")
+        ax2.plot(bdd.index, bdd.values, lw=1.2, color="#8a94a0", label="沪深300")
+        ax2.yaxis.set_major_formatter(lambda x, _: f"{x:.0%}")
+        ax2.set_title("回撤对比")
+        ax2.grid(alpha=0.25)
+        for s in ("top", "right"):
+            ax2.spines[s].set_visible(False)
+    else:
+        ax.set_title(f"虚盘净值(起点 {df['date'].iloc[0].date()} = 1.0)")
     ax.axhline(1.0, lw=0.7, color="#8a94a0", alpha=0.6)
-    ax.set_title(f"虚盘净值(起点 {df['date'].iloc[0].date()} = 1.0)")
     ax.grid(alpha=0.25)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
@@ -83,6 +120,20 @@ def _equity_chart(store: StateStore) -> str:
     fig.savefig(buf, format="png", dpi=130, facecolor="#1a2129")
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def _bench_stats(store: StateStore) -> tuple[float, float] | None:
+    """(同期沪深300 收益, 策略超额收益);无基准数据返回 None。"""
+    f = store.dir / "equity.csv"
+    if not f.exists() or len(f.read_text().splitlines()) < 3:
+        return None
+    df = pd.read_csv(f, parse_dates=["date"])
+    bench = _bench_nav(store, df["date"].iloc[0])
+    if bench is None:
+        return None
+    strat_ret = df["total"].iloc[-1] / df["total"].iloc[0] - 1
+    bench_ret = float(bench.iloc[-1] - 1)
+    return bench_ret, strat_ret - bench_ret
 
 
 def compare_fills(local_fills: list[dict], gm_execs: list[dict]) -> list[dict]:
@@ -229,6 +280,15 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
         "<p class='dim'>净值数据积累中(明日开始有曲线)</p>"
 
     principal = total - state.realized_pnl
+    bench_cards = ""
+    bs = _bench_stats(store)
+    if bs is not None:
+        bench_ret, excess = bs
+        bench_cards = f"""
+  <div class="card"><div class="k">同期沪深300</div>
+    <div class="v {_cls(bench_ret)}">{bench_ret:+.2%}</div></div>
+  <div class="card"><div class="k">跑赢大盘(超额)</div>
+    <div class="v {_cls(excess)}">{excess:+.2%}</div></div>"""
     html = f"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="300">
@@ -243,7 +303,7 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
   <div class="card"><div class="k">累计盈亏(含浮动)</div>
     <div class="v {_cls(total - principal)}">{total - principal:+,.0f}</div></div>
   <div class="card"><div class="k">已实现盈亏</div>
-    <div class="v {_cls(state.realized_pnl)}">{state.realized_pnl:+,.0f}</div></div>
+    <div class="v {_cls(state.realized_pnl)}">{state.realized_pnl:+,.0f}</div></div>{bench_cards}
 </div>
 <h2>待执行计划</h2>{plan_html}
 <h2>当前持仓</h2>

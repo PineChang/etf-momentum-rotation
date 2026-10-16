@@ -21,7 +21,7 @@ import pandas as pd
 from .backtest import run_backtest
 from .config import UNIVERSE, StrategyConfig
 from .data import (DATA_DIR, attach_premium, fetch_today_opens, fetch_universe,
-                   premium_status, update_premium_caches)
+                   premium_status, update_benchmark_cache, update_premium_caches)
 from .live import StateStore, check_fillable_at_open, execute_plan, make_plan
 from .metrics import format_metrics, perf_metrics
 
@@ -86,6 +86,12 @@ def cmd_fetch(args) -> None:
         print("溢价数据(raw+nav)已刷新")
     except Exception as e:
         print(f"警告:溢价数据刷新失败({e}),V3.1 的 premium 规则将使用旧缓存", file=sys.stderr)
+    # 业绩基准(沪深300,仪表盘"跑赢大盘"对比用)
+    try:
+        update_benchmark_cache()
+        print("基准(沪深300)已刷新")
+    except Exception as e:
+        print(f"警告:基准刷新失败({e}),仪表盘对比将使用旧缓存", file=sys.stderr)
 
 
 def _with_premium(cfg: StrategyConfig, data: dict) -> dict:

@@ -353,6 +353,35 @@ def fetch_today_opens(symbols: list[str], retries: int = 15, wait_s: float = 60.
     raise RuntimeError(f"{last_err}——非交易日或行情未开始,跳过(已重试 {retries} 次)")
 
 
+_BENCH_TS_CODE = "000300.SH"   # 业绩基准:沪深300 指数
+
+
+def update_benchmark_cache(start: str = "2026-01-01") -> None:
+    """沪深300 指数收盘缓存(data/000300.bench.csv),供仪表盘"跑赢大盘"对比。
+
+    重叠增量(指数收盘不会被修订);虚盘 2026-10 起步,缓存从今年起即可,
+    避免全历史单拉触发中转站 pool_exhausted。
+    """
+    f = DATA_DIR / "000300.bench.csv"
+    end = pd.Timestamp.today().strftime("%Y%m%d")
+    if f.exists():
+        old = pd.read_csv(f)
+        win_start = (pd.Timestamp(old["date"].max()) - pd.Timedelta(days=9)).strftime("%Y%m%d")
+    else:
+        old = pd.DataFrame(columns=["date", "close"])
+        win_start = start.replace("-", "")
+    df = _ts_pro().index_daily(ts_code=_BENCH_TS_CODE, start_date=win_start,
+                               end_date=end, fields="trade_date,close")
+    if df.empty:
+        warnings.warn("沪深300 指数取数为空,基准缓存停留旧值。", stacklevel=2)
+        return
+    new = pd.DataFrame({
+        "date": [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in df["trade_date"]],
+        "close": df["close"].astype(float),
+    })
+    pd.concat([old, new]).drop_duplicates("date").sort_values("date").to_csv(f, index=False)
+
+
 def update_premium_caches(symbols: list[str], start: str = "2019-01-01") -> None:
     """刷新溢价数据源缓存:{sym}.raw.csv(tushare 未复权收盘,重叠增量)+ {sym}.nav.csv(东财单位净值,全量)。
 
