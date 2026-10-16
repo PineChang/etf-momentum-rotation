@@ -64,18 +64,33 @@ def record_equity(store: StateStore, cash: float, market_value: float) -> None:
     f.write_text("date,cash,market_value,total\n" + "\n".join(rows) + "\n")
 
 
-def _bench_nav(store: StateStore, start: pd.Timestamp) -> pd.Series | None:
-    """沪深300 基准净值序列(归一到 start 起 1.0);无缓存或覆盖不足返回 None。"""
+def _bench_nav(store: StateStore, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series | None:
+    """沪深300 基准净值序列(归一到起点 1.0);无缓存或覆盖不足返回 None。
+
+    对齐口径:起点可能是非交易日(虚盘 2026-10-07 起步正值国庆假期),
+    以起点前最后一个交易日收盘为基准点;权益最后一行是"当日按昨收估值",
+    指数当日收盘未发布时,用最近收盘顺延到同一日期。
+    """
     from .data import DATA_DIR
 
     f = DATA_DIR / "000300.bench.csv"
     if not f.exists():
         return None
     df = pd.read_csv(f, parse_dates=["date"])
-    s = df[df["date"] >= start].set_index("date")["close"]
-    if len(s) < 2:
+    s = df.set_index("date")["close"].sort_index()
+    base = s[s.index <= start]
+    after = s[s.index > start]
+    if base.empty or after.empty:
         return None
-    return s / s.iloc[0]
+    nav = pd.concat([base.iloc[-1:], after])
+    nav = nav / nav.iloc[0]
+    # 起点非交易日(如国庆假期)时,基准点日期改为起点日——休市期间指数价值
+    # 即最近收盘,两条线从左缘同一点(1.0)出发
+    if nav.index[0] < start:
+        nav.index = [start, *nav.index[1:]]
+    if nav.index[-1] < end:
+        nav.loc[end] = nav.iloc[-1]
+    return nav
 
 
 def _equity_chart(store: StateStore) -> str:
@@ -86,7 +101,7 @@ def _equity_chart(store: StateStore) -> str:
     df = pd.read_csv(f, parse_dates=["date"])
     nav = df.set_index("date")["total"]
     nav = nav / nav.iloc[0]
-    bench = _bench_nav(store, df["date"].iloc[0])
+    bench = _bench_nav(store, df["date"].iloc[0], df["date"].iloc[-1])
     has_bench = bench is not None
 
     fig, axes = plt.subplots(
@@ -128,7 +143,7 @@ def _bench_stats(store: StateStore) -> tuple[float, float] | None:
     if not f.exists() or len(f.read_text().splitlines()) < 3:
         return None
     df = pd.read_csv(f, parse_dates=["date"])
-    bench = _bench_nav(store, df["date"].iloc[0])
+    bench = _bench_nav(store, df["date"].iloc[0], df["date"].iloc[-1])
     if bench is None:
         return None
     strat_ret = df["total"].iloc[-1] / df["total"].iloc[0] - 1
