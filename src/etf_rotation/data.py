@@ -236,13 +236,14 @@ def fetch_universe(symbols: list[str], start: str = "20190101", adjust: str = "q
 
 
 def fetch_premium(symbol: str) -> pd.Series:
-    """溢价率序列(index=date):未复权收盘 / 单位净值 - 1。
+    """溢价率序列(index=净值估值日):未复权收盘 / 单位净值 - 1。
 
     依赖缓存 data/{symbol}.raw.csv(tushare 未复权日线)与 {symbol}.nav.csv(东财单位净值),
     由 scripts/eval_zhihu.py 抓取。任一缺失时返回空序列(调用方按无数据处理)。
 
-    严格 PIT:信号日 t 收盘做决策时,当日净值(t 晚间)尚未公布,故每个交易日
-    取的是**前一交易日已知的溢价**(整体 shift 1),不引入未来信息。
+    这里按估值日保留原始溢价,不做整体 shift:是否可被某个信号日使用由
+    attach_premium 按"信号日前最新已公布"规则注入。这样净值滞后(QDII 常见 T+2)
+    时不会把最后一行最新净值溢价再错移/丢弃。
     """
     raw_f = DATA_DIR / f"{symbol}.raw.csv"
     nav_f = DATA_DIR / f"{symbol}.nav.csv"
@@ -254,11 +255,15 @@ def fetch_premium(symbol: str) -> pd.Series:
     if m.empty:
         return pd.Series(dtype=float)
     prem = pd.Series((m["close"] / m["nav"] - 1).to_numpy(), index=m["date"])
-    return prem.sort_index().ffill().shift(1).dropna()
+    return prem.sort_index().ffill().dropna()
 
 
 def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
-    """给每只 ETF 的行情 df 注入 premium 列(该日最新已知溢价,缺失日 ffill)。
+    """给每只 ETF 的行情 df 注入 premium 列(信号日前最新已公布溢价)。
+
+    PIT 语义:信号日 t 收盘做决策时,t 日净值通常尚未公布,所以 t 只能使用
+    premium 日期严格早于 t 的最后一条;若净值滞后(如 QDII T+2),则向前取最新
+    已公布值,而不是把整个序列再 shift 一次导致多用一天旧数据。
 
     premium_max 过滤(backtest._passes_risk_filters)只在行情 df 含 premium 列时生效;
     无缓存数据的标的自动放行,不会因数据缺失而误杀——但这也意味着规则会**静默失效**,
@@ -270,8 +275,12 @@ def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         if prem.empty:
             out[sym] = df
             continue
-        d = df.merge(prem.rename("premium"), left_on="date", right_index=True, how="left")
-        d["premium"] = d["premium"].ffill()
+        prem_df = prem.rename("premium").reset_index().rename(columns={"date": "premium_date"})
+        d = pd.merge_asof(
+            df.sort_values("date"), prem_df,
+            left_on="date", right_on="premium_date",
+            direction="backward", allow_exact_matches=False,
+        ).drop(columns="premium_date")
         out[sym] = d
     return out
 

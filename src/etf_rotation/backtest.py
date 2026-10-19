@@ -90,7 +90,7 @@ def _passes_entry_gates(symbol: str, data: dict[str, pd.DataFrame], t: int, cfg:
 
     - 知乎改进③:近 5 日出现单日跌超 5%,或连跌且累计跌超 5% 的标的不买(防接飞刀);
     - 知乎改进②:场内价对单位净值溢价过高(资金拥挤)不买,防溢价买入后坍塌套牢。
-      premium 列按 PIT 注入(信号日取前一交易日已公布的净值,见 data.fetch_premium);
+      premium 列按 PIT 注入(信号日取此前最新已公布的净值溢价,见 data.attach_premium);
       行情 df 无该列时视为无数据放行。
     已持有的标的即使触发上述条件也不因此卖出——持有期离场由止损/止盈/评分轮动负责。
     """

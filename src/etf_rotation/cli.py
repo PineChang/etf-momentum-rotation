@@ -252,6 +252,17 @@ def cmd_dashboard(args) -> None:
         subprocess.run(["open", str(out)], check=False)
 
 
+def cmd_notify(args) -> None:
+    """发送 Bark 例行任务摘要;通知失败只告警,不影响主任务结果。"""
+    from .notify import send_daily_notification
+
+    try:
+        send_daily_notification(STATE_DIR, DATA_DIR, ROOT / "logs" / "paper.log", args.task)
+        print("Bark 通知已发送")
+    except Exception as e:
+        print(f"警告:Bark 通知发送失败({e})", file=sys.stderr)
+
+
 def cmd_status(args) -> None:
     """每日查看:现金/持仓(浮盈亏)/权益/风控状态/待执行计划/最近成交。
 
@@ -321,10 +332,13 @@ def main() -> None:
     p_dash = sub.add_parser("dashboard", help="生成 HTML 虚盘仪表盘(state/dashboard.html)")
     p_dash.add_argument("--open", action="store_true", help="生成后在浏览器打开")
 
+    p_notify = sub.add_parser("notify", help="发送最近一次例行任务摘要到 Bark")
+    p_notify.add_argument("--task", choices=["morning", "evening", "manual"], default="manual")
+
     args = parser.parse_args()
     {"fetch": cmd_fetch, "backtest": cmd_backtest, "sweep": cmd_sweep,
      "plan": cmd_plan, "execute": cmd_execute, "status": cmd_status,
-     "dashboard": cmd_dashboard}[args.command](args)
+     "dashboard": cmd_dashboard, "notify": cmd_notify}[args.command](args)
 
 
 if __name__ == "__main__":

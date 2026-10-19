@@ -44,7 +44,7 @@ PYTHONPATH=src python -m etf_rotation.cli dashboard --open   # 或生成 HTML �
 PYTHONPATH=src python -m etf_rotation.cli status
 
 # 运行测试
-PYTHONPATH=src python -m pytest tests/ -q        # 107 passed
+PYTHONPATH=src python -m pytest tests/ -q        # 161 passed
 ```
 
 也可 `pip install -e .` 后直接使用 `etf-rotation <command>`。
@@ -89,6 +89,11 @@ Linux/Docker/云主机用户可直接挂 `scripts/gm_paper.py --token <token>` �
 > 工作日定时唤醒(morning 自带补跑,早醒一次即可兜住全天):
 > `sudo pmset repeat wakeorpoweron MTWRF 09:25:00`
 
+**Bark 手机推送**:iPhone 安装 Bark,复制设备 Key 写入项目根 `.env`
+(`BARK_KEY=你的Key`,该文件不入库)。早晚任务末尾会自动执行
+`cli notify --task morning|evening`,把任务结果、待执行订单、4 只 ETF 评分、
+总权益和持仓浮盈亏推送到手机;通知失败只写日志警告,不影响主任务。
+
 ## 项目结构
 
 ```
@@ -102,9 +107,10 @@ etf-momentum-rotation/
 │   ├── metrics.py     # 年化/夏普/回撤/胜率
 │   ├── report.py      # 净值图与交易明细导出
 │   ├── live.py        # 实盘四机制(计划/限价单/持久化/复利)
+│   ├── notify.py      # Bark 例行任务通知(任务结果/计划/评分/持仓)
 │   ├── sweep.py       # 参数遍历
 │   └── cli.py         # 命令行:fetch/backtest/sweep/plan
-├── tests/             # 107 个单元与集成测试(含确定性无前视检验)
+├── tests/             # 161 个单元与集成测试(含确定性无前视检验)
 ├── docs/
 │   ├── article-notes.md       # 文章知识提取(公式/参数/忠实度对照)
 │   ├── paper-trading-guide.md # 当前虚盘策略完整教程

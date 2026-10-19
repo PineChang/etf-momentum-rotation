@@ -279,21 +279,38 @@ class TestPremiumRule:
         assert PRESETS["v3.1"]["premium_max"] == 0.07
         assert "premium_max" not in PRESETS["v3"]   # V3 保持无溢价过滤原版
 
-    def test_fetch_premium_is_pit_shifted(self, tmp_path, monkeypatch):
-        """信号日收盘时当日净值未公布:premium 序列应整体 shift 1 天。"""
+    def test_fetch_premium_keeps_valuation_dates(self, tmp_path, monkeypatch):
+        """premium 序列按净值估值日保存;是否可被信号日使用由 attach_premium 决定。"""
         from etf_rotation import data as data_mod
         monkeypatch.setattr(data_mod, "DATA_DIR", tmp_path)
         raw = pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
-                            "close": [1.0, 1.0, 1.0]})
+                            "close": [1.0, 1.1, 1.2]})
         nav = pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
                             "nav": [1.0, 1.0, 1.0]})
         raw.to_csv(tmp_path / "X.raw.csv", index=False)
         nav.to_csv(tmp_path / "X.nav.csv", index=False)
         prem = data_mod.fetch_premium("X")
-        # 01-01 的溢价(0)在 01-02 才可知;01-01 无值
-        assert prem.index[0] == pd.Timestamp("2024-01-02")
-        assert (prem == 0.0).all()
+        assert list(prem.index) == list(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]))
+        assert prem.tolist() == pytest.approx([0.0, 0.1, 0.2])
         assert data_mod.fetch_premium("NOPE").empty
+
+    def test_attach_premium_uses_latest_known_nav_when_nav_lags(self, tmp_path, monkeypatch):
+        """回归:净值滞后时,信号日应取最新已公布净值,不能把最后一行再 shift 掉。"""
+        from etf_rotation import data as data_mod
+        monkeypatch.setattr(data_mod, "DATA_DIR", tmp_path)
+        pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+                      "close": [1.1, 1.2]}).to_csv(tmp_path / "X.raw.csv", index=False)
+        pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+                      "nav": [1.0, 1.0]}).to_csv(tmp_path / "X.nav.csv", index=False)
+        market = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]),
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+        })
+        out = data_mod.attach_premium({"X": market})["X"]
+        assert pd.isna(out["premium"].iloc[0])       # 01-01 之前无已知净值
+        assert out["premium"].iloc[1] == pytest.approx(0.1)   # 01-02 用 01-01
+        assert out["premium"].iloc[2] == pytest.approx(0.2)   # 净值滞后:01-03 用 01-02
+        assert out["premium"].iloc[3] == pytest.approx(0.2)
 
     def test_attach_premium_missing_cache_passes_through(self, tmp_path, monkeypatch):
         """无 raw/nav 缓存的标的:原样返回(无 premium 列,过滤放行)。"""

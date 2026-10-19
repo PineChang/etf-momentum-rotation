@@ -27,8 +27,8 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 def load_with_premium() -> dict[str, pd.DataFrame]:
     """qfq 行情 + 注入 premium 列。
 
-    走 canonical 实现 `data.attach_premium`(未复权收盘/单位净值-1,**整体 shift 1 天
-    保证 PIT**)。本脚本早期版本在这里自行 merge、没有 shift,等价于在信号日就用到
+    走 canonical 实现 `data.attach_premium`(未复权收盘/单位净值-1,按信号日前
+    最新已公布净值注入,保证 PIT)。本脚本早期版本在这里自行 merge、没有时移,等价于在信号日就用到
     当晚才公布的净值 —— 那一版的对照表含 1 日前视,数字已被替换(见
     docs/audit-report.md 第八节的修订说明)。
     """

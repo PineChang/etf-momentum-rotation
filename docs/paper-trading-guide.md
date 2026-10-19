@@ -256,7 +256,7 @@ data/{symbol}.nav.csv   # 基金单位净值
 premium = 未复权收盘价 / 单位净值 - 1
 ```
 
-实现上使用严格 PIT（point-in-time）口径：T 日收盘生成信号时，当日单位净值通常尚未公布，所以溢价序列整体 `shift(1)`，即 T 日只能使用前一交易日已经知道的溢价。
+实现上使用严格 PIT（point-in-time）口径：T 日收盘生成信号时，当日单位净值通常尚未公布，所以只使用净值日期早于 T 的最后一条溢价。若 QDII 净值滞后（例如 513100 周一仍只有上周四净值），就使用最新已公布值，不会因为整体后移而再多丢一天。
 
 溢价数据每次 `cli fetch` 时也会刷新。缺失或净值明显滞后时，命令行会打印警告，避免规则在旧数据上静默决策。
 
@@ -692,14 +692,14 @@ plan_date + data_asof
 | ETF | 综合评分 | 最新已知溢价 | 处理 |
 |---|---:|---:|---|
 | `512890` | `+0.4760` | `-0.25%` | 继续持有 |
-| `513100` | `+1.1641` | `+19.55%` | 评分更高，但溢价超过 7%，禁止新开仓 |
+| `513100` | `+1.1641` | `+15.72%` | 评分更高，但溢价超过 7%，禁止新开仓 |
 | `159949` | `-1.5226` | `+0.23%` | 不进入目标 |
 | `518880` | `-0.1175` | `-0.20%` | 不进入目标 |
 
 这份计划很能说明 V3.1 的关键逻辑：
 
 - 如果只看评分，`513100` 高于当前持有的 `512890`；
-- 但 `513100` 最新已知溢价约 `19.55%`，远高于 `premium_max=7%`；
+- 但 `513100` 最新已知溢价约 `15.72%`，仍高于 `premium_max=7%`；
 - 因此它不能作为新开仓候选；
 - 最终目标仍是 `512890`，订单为空。
 
@@ -789,6 +789,27 @@ macOS 注意事项：
 ```bash
 sudo pmset repeat wakeorpoweron MTWRF 09:25:00
 ```
+
+### 13.1 Bark 手机通知
+
+早晚任务最后会执行：
+
+```bash
+python -m etf_rotation.cli notify --task morning   # 或 evening
+```
+
+通知模块只读取本地 `state/` 与最近一次 `logs/paper.log` 任务块，不重新抓行情。
+推送内容包括：任务是否正常、最新计划及待执行订单、4 只 ETF 综合评分、
+溢价拦截提示、总权益、累计收益、当前持仓和移动止损线。
+
+iPhone 安装 Bark 后，把设备 Key 写入项目根 `.env`：
+
+```bash
+BARK_KEY=你的Key
+```
+
+`.env` 已在 `.gitignore` 中，不会提交。通知发送失败只会写警告日志，不会中断
+fetch、plan、execute 或 dashboard。
 
 ---
 
@@ -883,25 +904,33 @@ PYTHONPATH=src python -m etf_rotation.cli status
 PYTHONPATH=src python -m etf_rotation.cli dashboard --open
 ```
 
-### 15.7 回测当前虚盘策略
+### 15.7 发送 Bark 通知
+
+```bash
+PYTHONPATH=src python -m etf_rotation.cli notify --task manual
+```
+
+定时脚本会自动传 `morning` 或 `evening`。
+
+### 15.8 回测当前虚盘策略
 
 ```bash
 PYTHONPATH=src python -m etf_rotation.cli backtest --preset v3.1
 ```
 
-### 15.8 完整跑一遍早间流程
+### 15.9 完整跑一遍早间流程
 
 ```bash
 ./scripts/daily_paper.sh morning
 ```
 
-### 15.9 完整跑一遍晚间流程
+### 15.10 完整跑一遍晚间流程
 
 ```bash
 ./scripts/daily_paper.sh evening
 ```
 
-### 15.10 运行测试
+### 15.11 运行测试
 
 ```bash
 PYTHONPATH=src python -m pytest tests/ -q
