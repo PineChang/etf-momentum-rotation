@@ -63,6 +63,8 @@ PYTHONPATH=src python -m pytest tests/ -q        # 107 passed
 按真实开盘价成交并记账(限价单开盘价未成交则整批放弃、可稍候重跑;同一计划拒绝重复执行;
 非交易日自动跳过)。`cli status` 随时查看持仓/浮盈亏/权益/最近成交(纯离线读缓存),
 `cli dashboard --open` 生成网页仪表盘(浏览器直接看)。
+当前虚盘配置、每日计划→开盘成交→状态落盘的完整教程见
+[`docs/paper-trading-guide.md`](docs/paper-trading-guide.md)。
 
 **双轨对照(可选,B 轨 = 掘金仿真)**:同一信号源送掘金仿真账户真实撮合,仪表盘逐笔比较
 两边成交价差。⚠️ 掘金 gmtrade SDK 仅 Windows/Linux 二进制(无 macOS 轮子),Mac 用户走
@@ -104,8 +106,9 @@ etf-momentum-rotation/
 │   └── cli.py         # 命令行:fetch/backtest/sweep/plan
 ├── tests/             # 107 个单元与集成测试(含确定性无前视检验)
 ├── docs/
-│   ├── article-notes.md   # 文章知识提取(公式/参数/忠实度对照)
-│   └── development.md     # 开发过程记录
+│   ├── article-notes.md       # 文章知识提取(公式/参数/忠实度对照)
+│   ├── paper-trading-guide.md # 当前虚盘策略完整教程
+│   └── development.md         # 开发过程记录
 ├── data/              # 行情缓存
 ├── output/            # 回测图表、交易明细、遍历结果
 └── state/             # 实盘状态(持仓/日志/参数)
