@@ -103,7 +103,10 @@ class StateStore:
         if not self.log_file.exists():
             return None
         for line in reversed(self.log_file.read_text().splitlines()):
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if rec.get("type") == "plan":
                 return rec
         return None
@@ -113,7 +116,10 @@ class StateStore:
         if not self.log_file.exists():
             return False
         for line in self.log_file.read_text().splitlines():
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if (rec.get("type") == "fill"
                     and rec.get("plan_date") == plan.get("plan_date")
                     and rec.get("data_asof") == plan.get("data_asof")):

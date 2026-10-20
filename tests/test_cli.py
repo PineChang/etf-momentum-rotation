@@ -56,6 +56,28 @@ class TestPlanUnchanged:
         assert _plan_unchanged(StateStore(tmp_path), {"data_asof": "2026-09-30"},
                                StrategyConfig()) is False
 
+    def test_premium_change_invalidates_same_signal_plan(self, tmp_path):
+        """净值晚些时候补发时,同一信号日也必须重新落计划(溢价门槛可能改变)。"""
+        cfg = StrategyConfig(premium_max=0.07)
+        store = StateStore(tmp_path)
+        store.save_params(cfg)
+        old = {"A": {"premium": 0.06, "gate_premium": 0.06, "asof": "2026-10-15"}}
+        new = {"A": {"premium": 0.08, "gate_premium": 0.08, "asof": "2026-10-16"}}
+        store.append_log({"type": "plan", "data_asof": "2026-09-30", "premium_check": old})
+        assert _plan_unchanged(store, {"data_asof": "2026-09-30"}, cfg, old) is True
+        assert _plan_unchanged(store, {"data_asof": "2026-09-30"}, cfg, new) is False
+
+    def test_stale_display_flag_does_not_duplicate_same_plan(self, tmp_path):
+        """stale 是随 wall-clock 变化的展示字段,不应破坏同一信号日幂等。"""
+        cfg = StrategyConfig(premium_max=0.07)
+        store = StateStore(tmp_path)
+        store.save_params(cfg)
+        old = {"A": {"premium": 0.06, "gate_premium": 0.06, "asof": "2026-10-15",
+                     "nav_lag": 1, "missing": False, "stale": False}}
+        new = {**old, "A": {**old["A"], "stale": True}}
+        store.append_log({"type": "plan", "data_asof": "2026-09-30", "premium_check": old})
+        assert _plan_unchanged(store, {"data_asof": "2026-09-30"}, cfg, new) is True
+
 
 class TestCmdStatus:
     def test_prints_holdings_and_pnl(self, tmp_path, monkeypatch, capsys):
@@ -68,6 +90,14 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         assert "518880" in out and "浮盈亏" in out and "总权益" in out
         assert "空仓" not in out.split("持仓")[0]
+
+    def test_status_tolerates_malformed_log_line(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(cli_mod, "STATE_DIR", tmp_path)
+        store = StateStore(tmp_path)
+        store.save_state(LiveState(cash=100_000.0))
+        store.log_file.write_text("not-json\n")
+        cmd_status(None)
+        assert "总权益" in capsys.readouterr().out
 
 
 class TestCmdPlan:
@@ -177,6 +207,18 @@ class TestCmdExecute:
         assert _log(cli_state, "fill") == [] and _log(cli_state, "skip") == []
         assert cli_state.load_state().holdings == {}
 
+    def test_exchange_holiday_skips_before_open_price_fetch(self, cli_state, monkeypatch, capsys):
+        """工作日但交易所休市:日历确认后直接跳过,不触发 15 分钟开盘价重试。"""
+        import etf_rotation.market_calendar as market_calendar
+
+        self._seed(cli_state, TODAY, [self.BUY])
+        monkeypatch.setattr(market_calendar, "is_trading_day", lambda: False)
+        monkeypatch.setattr(cli_mod, "fetch_today_opens",
+                            lambda *a, **k: pytest.fail("休市日不应拉取开盘价"))
+        cmd_execute(None)
+        assert "今日非交易日" in capsys.readouterr().out
+        assert _log(cli_state, "fill") == [] and _log(cli_state, "skip") == []
+
     def test_empty_order_plan_is_noop(self, cli_state, monkeypatch, capsys):
         self._seed(cli_state, TODAY, [])
         monkeypatch.setattr(cli_mod, "fetch_today_opens",
@@ -195,6 +237,7 @@ class TestDashboard:
         store.save_state(LiveState(cash=49_000.0,
                                    holdings={"518880": Holding("518880", 5000.0, 8.0, 8.5)},
                                    realized_pnl=123.0))
+        store.log_file.write_text("not-json\n")
         df = pd.DataFrame({"date": pd.bdate_range("2026-09-28", periods=3),
                            "open": 8.6, "high": 8.7, "low": 8.5, "close": 8.6, "volume": 1e6})
         out = render_dashboard(store, {"518880": df}, tmp_path / "dashboard.html")

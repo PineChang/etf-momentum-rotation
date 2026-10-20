@@ -277,8 +277,13 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
     # ---- 成交历史 ----
     fills: list[dict] = []
     if store.log_file.exists():
-        fills = [r for r in (json.loads(x) for x in store.log_file.read_text().splitlines())
-                 if r.get("type") == "fill"]
+        for line in store.log_file.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") == "fill":
+                fills.append(rec)
     fill_rows = ""
     for f in reversed(fills):
         for x in f["fills"]:

@@ -138,17 +138,51 @@ def cmd_sweep(args) -> None:
     print("提示(文章原话):参数最优存在过拟合风险,不要太执着于调参。")
 
 
-def _plan_unchanged(store: StateStore, plan: dict, cfg: StrategyConfig) -> bool:
-    """同一信号日 + 同一参数 => 计划不变,不重复落盘。
+def _decision_premium_check(check: dict | None) -> dict | None:
+    """只保留会影响交易决策的溢价字段;stale 是展示/告警字段,不参与幂等比较。"""
+    if check is None:
+        return None
+    keys = ("premium", "gate_premium", "asof", "nav_lag", "missing")
+    return {symbol: {k: item.get(k) for k in keys} for symbol, item in check.items()}
+
+
+def _plan_unchanged(store: StateStore, plan: dict, cfg: StrategyConfig,
+                    premium_check: dict | None = None) -> bool:
+    """同一信号日 + 同一参数 + 同一溢价安检 => 计划不变,不重复落盘。
 
     防止非交易日/手动重跑 plan 把同一信号重复写进日志、top_streak 被重复推进。
+    premium_check 必须参与比较:净值可能在同一天晚些时候补发,溢价门槛变化会
+    改变目标持仓,不能只因信号日/参数相同就跳过。
     """
     last = store.latest_plan()
     if last is None or last.get("data_asof") != plan["data_asof"]:
         return False
     if not store.params_file.exists():
         return False
-    return json.loads(store.params_file.read_text()) == asdict(cfg)
+    if json.loads(store.params_file.read_text()) != asdict(cfg):
+        return False
+    if cfg.premium_max is not None and (
+            _decision_premium_check(last.get("premium_check"))
+            != _decision_premium_check(premium_check)):
+        return False
+    return True
+
+
+def _premium_snapshot(cfg: StrategyConfig, data: dict, data_asof: str) -> dict | None:
+    """plan 中展示的溢价快照:最新估值值 + 本次入场门槛实际使用值。"""
+    if cfg.premium_max is None:
+        return None
+    status = premium_status(list(data))
+    signal_date = pd.Timestamp(data_asof)
+    for symbol, item in status.items():
+        gate = None
+        df = data.get(symbol)
+        if df is not None and "premium" in df:
+            row = df.loc[df["date"] == signal_date, "premium"]
+            if not row.empty and pd.notna(row.iloc[0]):
+                gate = round(float(row.iloc[0]), 4)
+        item["gate_premium"] = gate
+    return status
 
 
 def cmd_plan(args) -> None:
@@ -163,15 +197,12 @@ def cmd_plan(args) -> None:
         detail = "、".join(f"{s}(最新 {d})" for s, d in plan["data_lag"].items())
         print(f"警告:信号日 {plan['data_asof']} 落后于部分标的最新 bar——{detail};"
               f"这些标的当日缺 bar(停牌/数据源缺口),全池对齐后被回退。", file=sys.stderr)
-    if _plan_unchanged(store, plan, cfg):
+    premium_check = _premium_snapshot(cfg, data, plan["data_asof"])
+    if _plan_unchanged(store, plan, cfg, premium_check):
         print(f"信号日 {plan['data_asof']} 的计划已生成过且参数未变,跳过(避免连击重复推进)")
         return
-    if cfg.premium_max is not None:
-        status = premium_status(list(data))
-        plan["premium_check"] = {
-            s: {"premium": st["premium"], "asof": st["asof"],
-                "nav_lag": st["nav_lag"], "stale": st["stale"]} for s, st in status.items()
-        }
+    if premium_check is not None:
+        plan["premium_check"] = premium_check
         plan["premium_rule"] = f"溢价 > {cfg.premium_max:.0%} 不开新仓(入场安检,已持有不受影响;当日计划已自动排除)"
     store.save_state(new_state)      # 风控状态(锚点/禁买/连击)先落地,再谈成交
     store.save_params(cfg)
@@ -200,6 +231,12 @@ def cmd_execute(args) -> None:
     age = (pd.Timestamp.today() - pd.Timestamp(plan["plan_date"])).days
     if age > 4:
         print(f"计划生成于 {plan['plan_date']},已过 {age} 天,信号可能过时——请先 cli plan 重新生成")
+        return
+    from .market_calendar import is_trading_day
+
+    trading = is_trading_day()
+    if trading is False:
+        print("今日非交易日(交易日历确认),无需执行;跳过开盘价拉取")
         return
     if store.params_file.exists():
         cfg = StrategyConfig(**json.loads(store.params_file.read_text()))
@@ -254,12 +291,14 @@ def cmd_dashboard(args) -> None:
 
 def cmd_notify(args) -> None:
     """发送 Bark 例行任务摘要;通知失败只告警,不影响主任务结果。"""
-    from .notify import send_daily_notification
+    from .notify import record_notify_status, send_daily_notification
 
     try:
         send_daily_notification(STATE_DIR, DATA_DIR, ROOT / "logs" / "paper.log", args.task)
+        record_notify_status(STATE_DIR, True, "sent")
         print("Bark 通知已发送")
     except Exception as e:
+        record_notify_status(STATE_DIR, False, str(e))
         print(f"警告:Bark 通知发送失败({e})", file=sys.stderr)
 
 
@@ -297,8 +336,14 @@ def cmd_status(args) -> None:
         print(f"待执行计划({plan['plan_date']} 生成,信号日 {plan['data_asof']}): {acts}")
 
     if store.log_file.exists():
-        fills = [json.loads(x) for x in store.log_file.read_text().splitlines()
-                 if json.loads(x).get("type") == "fill"]
+        fills = []
+        for line in store.log_file.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") == "fill":
+                fills.append(rec)
         if fills:
             print("最近成交(新→旧,最多 8 条):")
             for f in reversed(fills[-8:]):

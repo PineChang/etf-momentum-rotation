@@ -249,21 +249,22 @@ def fetch_premium(symbol: str) -> pd.Series:
     nav_f = DATA_DIR / f"{symbol}.nav.csv"
     if not (raw_f.exists() and nav_f.exists()):
         return pd.Series(dtype=float)
-    raw = pd.read_csv(raw_f, parse_dates=["date"])
-    nav = pd.read_csv(nav_f, parse_dates=["date"])
+    raw = pd.read_csv(raw_f, parse_dates=["date"]).drop_duplicates("date", keep="last")
+    nav = pd.read_csv(nav_f, parse_dates=["date"]).drop_duplicates("date", keep="last")
     m = raw.merge(nav, on="date")
     if m.empty:
         return pd.Series(dtype=float)
     prem = pd.Series((m["close"] / m["nav"] - 1).to_numpy(), index=m["date"])
-    return prem.sort_index().ffill().dropna()
+    return prem.sort_index().dropna()
 
 
 def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
-    """给每只 ETF 的行情 df 注入 premium 列(信号日前最新已公布溢价)。
+    """给每只 ETF 的行情 df 注入 premium 列(信号日前最近一个净值估值日的溢价)。
 
     PIT 语义:信号日 t 收盘做决策时,t 日净值通常尚未公布,所以 t 只能使用
     premium 日期严格早于 t 的最后一条;若净值滞后(如 QDII T+2),则向前取最新
-    已公布值,而不是把整个序列再 shift 一次导致多用一天旧数据。
+    已入库值,而不是把整个序列再 shift 一次导致多用一天旧数据。注意:回测按估值日
+    对齐,未建模实际公告日;live 则受缓存天然滞后约束。
 
     premium_max 过滤(backtest._passes_risk_filters)只在行情 df 含 premium 列时生效;
     无缓存数据的标的自动放行,不会因数据缺失而误杀——但这也意味着规则会**静默失效**,
@@ -271,13 +272,14 @@ def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     """
     out = {}
     for sym, df in data.items():
+        df = df.sort_values("date").reset_index(drop=True)
         prem = fetch_premium(sym)
         if prem.empty:
             out[sym] = df
             continue
         prem_df = prem.rename("premium").reset_index().rename(columns={"date": "premium_date"})
         d = pd.merge_asof(
-            df.sort_values("date"), prem_df,
+            df, prem_df,
             left_on="date", right_on="premium_date",
             direction="backward", allow_exact_matches=False,
         ).drop(columns="premium_date")
@@ -285,16 +287,21 @@ def attach_premium(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     return out
 
 
+_QDII_MAX_LAG_DAYS = {"513100": 2}   # 美股 QDII 净值 T+2 披露属正常节奏
+
+
 def premium_status(symbols: list[str], max_lag_days: int = 1,
                    max_age_days: int = 7) -> dict[str, dict]:
     """溢价数据健康检查:{symbol: {premium, asof, nav_lag, missing, stale}}。
 
     missing = 无 raw/nav 缓存(规则对该标的静默失效);
+    asof    = 最新净值估值日(不是该净值实际公告日);
     nav_lag = 单位净值落后行情数据多少个交易日 —— 溢价率的口径是"场内价 / 当日
               单位净值",净值当晚才公布。净值一旦落后,算出的溢价就是旧值。
               实测 513100 曾落后 3 个交易日(溢价读数 13.93% 实为 3 日前的数),
               而只按"距今 7 天内"判定会认为它很新鲜,规则就在过期数据上静默决策;
-    stale   = nav_lag > max_lag_days,或最新溢价距今超 max_age_days 天(缓存久未刷新)。
+    stale   = nav_lag 超过该品种正常披露节奏,或最新溢价距今超 max_age_days 天。
+              美股 QDII(513100)允许 T+2,其余标的默认 T+1。
     """
     today = pd.Timestamp.today().normalize()
     out = {}
@@ -313,7 +320,8 @@ def premium_status(symbols: list[str], max_lag_days: int = 1,
                         "missing": True, "stale": True}
             continue
         asof = prem.index[-1]
-        stale = (lag is not None and lag > max_lag_days) or (today - asof).days > max_age_days
+        lag_limit = _QDII_MAX_LAG_DAYS.get(sym, max_lag_days)
+        stale = (lag is not None and lag > lag_limit) or (today - asof).days > max_age_days
         out[sym] = {
             "premium": round(float(prem.iloc[-1]), 4),
             "asof": str(asof.date()),

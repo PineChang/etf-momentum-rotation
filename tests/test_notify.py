@@ -138,7 +138,7 @@ def test_build_notification_contains_plan_scores_and_account(paper_fixture):
     assert "【评分】\n513100 +1.1641\n512890 +0.4760\n518880 -0.1175\n159949 -1.5226" in body
     assert "【账户】\n权益 100,913.87\n收益 +913.87（+0.91%）" in body
     assert "【持仓】\n512890 红利低波ETF\n41,767份｜1.197→1.219\n浮盈 +1.84%｜+919元\n止损线 1.133" in body
-    assert "【提示】\n513100 溢价 19.6%｜禁新开仓" in body
+    assert "【提示】\n513100 门槛溢价 19.6%｜禁新开仓" in body
 
 
 def test_send_bark_uses_post_json(monkeypatch):
@@ -172,3 +172,76 @@ def test_send_bark_rejects_api_failure(monkeypatch):
                         lambda *a, **k: _Response(b'{"code": 400, "message": "bad key"}'))
     with pytest.raises(RuntimeError, match="bad key"):
         notify.send_bark("bad", "title", "body")
+
+
+def test_load_bark_key_accepts_export_whitespace_and_comment(tmp_path, monkeypatch):
+    monkeypatch.delenv("BARK_KEY", raising=False)
+    (tmp_path / ".env").write_text("export BARK_KEY = \"quoted-key\"  # local\n")
+    assert notify.load_bark_key(tmp_path) == "quoted-key"
+
+
+def test_load_bark_key_preserves_hash_inside_quotes(tmp_path, monkeypatch):
+    monkeypatch.delenv("BARK_KEY", raising=False)
+    (tmp_path / ".env").write_text('BARK_KEY="ab#cd"\n')
+    assert notify.load_bark_key(tmp_path) == "ab#cd"
+
+
+def test_send_bark_rejects_plain_http():
+    with pytest.raises(RuntimeError, match="https"):
+        notify.send_bark("key", "title", "body", server="http://example.com")
+
+
+def test_log_summary_strips_local_path_and_suppresses_holiday_noise():
+    block = [
+        "=== run ===",
+        "/Users/apple/Desktop/demo/src/data.py:205: UserWarning: 513100 取数失败(timeout),回退东财。",
+    ]
+    status, issues = notify.summarize_log(block)
+    assert status == "有警告"
+    assert issues == ["513100 取数失败(timeout),回退东财。"]
+
+    holiday = ["=== run ===", "以下限价单在开盘价未成交,本次整批不执行(可稍候重跑):"]
+    assert notify.summarize_log(holiday, trading_day=False) == ("正常", [])
+
+    frame = '  File "/Users/apple/Desktop/demo project/src/data.py", line 205, in fetch_etf'
+    assert notify._clean_issue(frame) == "Traceback: fetch_etf (line 205)"
+    spaced_warning = "/Users/apple/Desktop/demo project/src/data.py:205: UserWarning: 513100 取数失败"
+    assert notify._clean_issue(spaced_warning) == "513100 取数失败"
+
+
+def test_premium_lines_include_blocked_and_stale():
+    plan = {"premium_check": {
+        "A": {"premium": 0.09, "gate_premium": 0.08, "stale": False},
+        "B": {"premium": 0.01, "gate_premium": 0.01, "stale": True},
+    }}
+    lines = notify._premium_lines(plan, StrategyConfig(premium_max=0.07))
+    assert lines == ["【提示】", "A 门槛溢价 8.0%｜禁新开仓（最新估值 9.0%）", "B 溢价数据滞后"]
+
+
+def test_plan_lines_pending_and_executed_with_malformed_log_line(tmp_path):
+    store = StateStore(tmp_path)
+    plan = {"type": "plan", "plan_date": "2026-10-19", "data_asof": "2026-10-16",
+            "orders": [{"action": "BUY", "symbol": "512890", "limit_price": 1.208,
+                        "est_budget": 50_000.0}]}
+    store.append_log(plan)
+    lines, _ = notify._plan_lines(store)
+    assert "待执行" in lines and "限价 1.208｜约 50,000元" in lines
+
+    with store.log_file.open("a") as f:
+        f.write("not-json\n")
+    store.append_log({"type": "fill", "plan_date": "2026-10-19", "data_asof": "2026-10-16",
+                      "fills": [{"action": "BUY", "symbol": "512890", "fill_price": 1.197}]})
+    lines, _ = notify._plan_lines(store)
+    assert "已成交" in lines and "BUY 512890｜成交价 1.197" in lines
+
+
+def test_record_notify_status(tmp_path):
+    notify.record_notify_status(tmp_path, False, "api failed")
+    payload = json.loads((tmp_path / "notify_status.json").read_text())
+    assert payload["ok"] is False and payload["message"] == "api failed" and payload["at"]
+
+
+def test_latest_log_block_uses_last_task_header(tmp_path):
+    log = tmp_path / "paper.log"
+    log.write_text("=== old ===\nold warning\n=== new ===\nnew line\n")
+    assert notify.latest_log_block(log) == ["=== new ===", "new line"]

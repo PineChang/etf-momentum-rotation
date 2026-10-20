@@ -312,6 +312,24 @@ class TestPremiumRule:
         assert out["premium"].iloc[2] == pytest.approx(0.2)   # 净值滞后:01-03 用 01-02
         assert out["premium"].iloc[3] == pytest.approx(0.2)
 
+    def test_attach_premium_dedupes_dates_drops_nan_and_sorts_input(self, tmp_path, monkeypatch):
+        """缓存边界:重复日期取最后一行,NaN 净值不沿用旧值,乱序行情仍按日期升序输出。"""
+        from etf_rotation import data as data_mod
+        monkeypatch.setattr(data_mod, "DATA_DIR", tmp_path)
+        pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02"]),
+                      "close": [1.0, 1.1, 1.2]}).to_csv(tmp_path / "X.raw.csv", index=False)
+        pd.DataFrame({"date": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+                      "nav": [1.0, None]}).to_csv(tmp_path / "X.nav.csv", index=False)
+        market = pd.DataFrame({
+            "date": pd.to_datetime(["2024-01-03", "2024-01-02", "2024-01-01"]),
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
+        })
+        out = data_mod.attach_premium({"X": market})["X"]
+        assert list(out["date"]) == list(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]))
+        assert pd.isna(out["premium"].iloc[0])
+        assert out["premium"].iloc[1] == pytest.approx(0.1)   # 重复 01-01 取最后 close=1.1
+        assert out["premium"].iloc[2] == pytest.approx(0.1)   # 01-02 净值 NaN,不伪装成新日期
+
     def test_attach_premium_missing_cache_passes_through(self, tmp_path, monkeypatch):
         """无 raw/nav 缓存的标的:原样返回(无 premium 列,过滤放行)。"""
         from etf_rotation import data as data_mod
@@ -342,6 +360,19 @@ class TestPremiumRule:
         ok = data_mod.premium_status(["OK"])
         assert ok["OK"]["nav_lag"] == 0
         assert ok["OK"]["stale"] is False
+
+    def test_premium_status_allows_normal_qdii_t_plus_2_lag(self, tmp_path, monkeypatch):
+        """513100 美股 QDII 周一落后 2 个行情日属正常披露节奏,不升级 stale。"""
+        from etf_rotation import data as data_mod
+        monkeypatch.setattr(data_mod, "DATA_DIR", tmp_path)
+        bars = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=4)
+        pd.DataFrame({"date": bars, "close": 2.0}).to_csv(tmp_path / "513100.raw.csv", index=False)
+        pd.DataFrame({"date": bars[:-2], "nav": 1.9}).to_csv(tmp_path / "513100.nav.csv", index=False)
+        st = data_mod.premium_status(["513100"])["513100"]
+        assert st["nav_lag"] == 2
+        assert st["stale"] is False
+        assert st["asof"] == str(bars[-3].date())
+        assert st["premium"] == pytest.approx(round(2.0 / 1.9 - 1, 4))
 
     def test_premium_status_missing_and_stale(self, tmp_path, monkeypatch):
         """premium_status:无缓存 missing=True;旧数据 stale=True。"""

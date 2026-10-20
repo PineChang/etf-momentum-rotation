@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pandas as pd
 
 from .config import UNIVERSE, StrategyConfig
 from .live import StateStore
+from .market_calendar import is_trading_day
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SERVER = "https://api.day.app"
@@ -33,9 +35,19 @@ def load_bark_key(root: Path | None = None) -> str | None:
     env_file = (root or ROOT) / ".env"
     if not env_file.exists():
         return None
-    for line in env_file.read_text().splitlines():
-        if line.startswith("BARK_KEY="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    for raw in env_file.read_text().splitlines():
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == "BARK_KEY":
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                return value[1:-1] or None
+            value = value.split("#", 1)[0].strip().strip('"').strip("'")
+            return value or None
     return None
 
 
@@ -48,8 +60,19 @@ def latest_log_block(log_file: Path) -> list[str]:
     return lines[starts[-1]:] if starts else lines[-200:]
 
 
-def summarize_log(block: list[str]) -> tuple[str, list[str]]:
-    """把最近一次任务日志概括为 正常/有警告/异常,并提取最多 3 条问题行。"""
+def _clean_issue(line: str) -> str:
+    """推送前去掉本地源码路径/Warning 前缀,避免泄露本机目录。"""
+    frame = re.search(r'File "[^"]+", line (\d+), in ([^"]+)$', line)
+    if frame:
+        return f"Traceback: {frame.group(2)} (line {frame.group(1)})"
+    return re.sub(r"^.*?\.py:\d+:\s*(?:\w+Warning:\s*)?", "", line)
+
+
+def summarize_log(block: list[str], trading_day: bool | None = None) -> tuple[str, list[str]]:
+    """把最近一次任务日志概括为 正常/有警告/异常,并提取最多 3 条问题行。
+
+    非交易日时,"无法执行/未成交/计划过时"是预期行为,不升级为警告。
+    """
     if not block:
         return "无日志", []
     issues: list[str] = []
@@ -66,11 +89,15 @@ def summarize_log(block: list[str]) -> tuple[str, list[str]]:
         if any(term in line for term in (
                 "Error:", "取数失败", "刷新失败", "无法执行", "回退东财", "警告",
                 "不执行", "未成交", "信号可能过时")):
+            if trading_day is False and any(term in line for term in (
+                    "无法执行", "不执行", "未成交", "信号可能过时")):
+                continue
+            line = _clean_issue(line)
             if line not in issues:
                 issues.append(line)
     if traceback_count:
         if not issues and meaningful:
-            issues.append(meaningful[-1])
+            issues.append(_clean_issue(meaningful[-1]))
         return "异常", issues[-3:]
     return ("有警告", issues[-3:]) if issues else ("正常", [])
 
@@ -105,7 +132,10 @@ def _latest_fill(store: StateStore, plan: dict) -> dict | None:
     if not store.log_file.exists():
         return None
     for line in reversed(store.log_file.read_text().splitlines()):
-        rec = json.loads(line)
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if (rec.get("type") == "fill"
                 and rec.get("plan_date") == plan.get("plan_date")
                 and rec.get("data_asof") == plan.get("data_asof")):
@@ -155,11 +185,15 @@ def _premium_lines(plan: dict | None, cfg: StrategyConfig) -> list[str]:
     stale = []
     for symbol, status in checks.items():
         premium = status.get("premium")
-        if premium is not None and premium > cfg.premium_max:
-            blocked.append(f"{symbol} 溢价 {premium:.1%}｜禁新开仓")
+        gate = status.get("gate_premium", premium)
+        if gate is not None and gate > cfg.premium_max:
+            text = f"{symbol} 门槛溢价 {gate:.1%}｜禁新开仓"
+            if premium is not None and premium != gate:
+                text += f"（最新估值 {premium:.1%}）"
+            blocked.append(text)
         if status.get("stale"):
             stale.append(f"{symbol} 溢价数据滞后")
-    lines = blocked or stale
+    lines = blocked + stale
     return ["【提示】", *lines] if lines else []
 
 
@@ -200,6 +234,19 @@ def _short_issue(line: str, limit: int = 72) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
+def record_notify_status(state_dir: Path, ok: bool, message: str) -> None:
+    """记录最近一次 Bark 推送结果,便于排查"手机没收到但任务显示完成"。"""
+    try:
+        path = state_dir / "notify_status.json"
+        path.write_text(json.dumps({
+            "ok": ok,
+            "at": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "message": message,
+        }, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
 def build_notification(
     state_dir: Path,
     data_dir: Path,
@@ -210,7 +257,8 @@ def build_notification(
     store = StateStore(state_dir)
     cfg = _load_params(store)
     closes, asof = _latest_closes(data_dir)
-    status, issues = summarize_log(latest_log_block(log_file))
+    trading = is_trading_day()
+    status, issues = summarize_log(latest_log_block(log_file), trading)
     label = _TASK_LABELS.get(task, task)
     icon = _STATUS_ICONS.get(status, "ℹ️")
 
@@ -222,6 +270,8 @@ def build_notification(
         _account_lines(store, closes, cfg),
     ]
     body = [f"状态：{status}｜行情 {asof}"]
+    if trading is False:
+        body.append("今日非交易日（交易日历确认）")
     for section in sections:
         if section:
             body.extend(["", *section])
@@ -243,6 +293,8 @@ def send_bark(
     key = key.strip()
     if not key:
         raise RuntimeError("未配置 BARK_KEY")
+    if not server.lower().startswith("https://"):
+        raise RuntimeError("Bark server 必须使用 https://")
     url = f"{server.rstrip('/')}/push"
     payload = {"device_key": key, "title": title, "body": body, "group": group, "ttl": ttl}
     request = urllib.request.Request(

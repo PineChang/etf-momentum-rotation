@@ -4,3 +4,4 @@ akshare>=1.16
 matplotlib>=3.9
 pytest>=8.0
 tushare==1.4.29
+duckdb>=1.0

@@ -21,7 +21,7 @@
 ## 快速开始
 
 ```bash
-# 安装(建议虚拟环境,Python ≥ 3.11)
+# 安装(建议虚拟环境,Python ≥ 3.11;先确认 python --version,macOS 系统 python 可能过旧)
 pip install -r requirements.txt
 
 # 下载数据(akshare,缓存到 data/)
@@ -44,7 +44,7 @@ PYTHONPATH=src python -m etf_rotation.cli dashboard --open   # 或生成 HTML �
 PYTHONPATH=src python -m etf_rotation.cli status
 
 # 运行测试
-PYTHONPATH=src python -m pytest tests/ -q        # 161 passed
+PYTHONPATH=src python -m pytest tests/ -q        # 178 passed
 ```
 
 也可 `pip install -e .` 后直接使用 `etf-rotation <command>`。
@@ -88,11 +88,15 @@ Linux/Docker/云主机用户可直接挂 `scripts/gm_paper.py --token <token>` �
 > (macOS TCC),cron 有,无需额外授权。cron 不会唤醒睡眠中的 Mac,需配一个
 > 工作日定时唤醒(morning 自带补跑,早醒一次即可兜住全天):
 > `sudo pmset repeat wakeorpoweron MTWRF 09:25:00`
+>
+> 交易日判断读取同级 `../data_source` 项目的 `trade_calendar`(需 `duckdb`);
+> 日历缺失时自动回退到原开盘价探测逻辑,不会误判休市。
 
 **Bark 手机推送**:iPhone 安装 Bark,复制设备 Key 写入项目根 `.env`
-(`BARK_KEY=你的Key`,该文件不入库)。早晚任务末尾会自动执行
+(`BARK_KEY=你的Key`,该文件不入库)。四个 cron 时隙和周末晚间维护任务都会执行
 `cli notify --task morning|evening`,把任务结果、待执行订单、4 只 ETF 评分、
-总权益和持仓浮盈亏推送到手机;通知失败只写日志警告,不影响主任务。
+总权益和持仓浮盈亏推送到手机;通知失败只写日志警告并记录 `state/notify_status.json`,不影响主任务。
+注意:正文包含账户金额与持仓明细,会经过 Bark 公共服务和 Apple APNs;日志路径会在推送前剥离。
 
 ## 项目结构
 
@@ -107,10 +111,11 @@ etf-momentum-rotation/
 │   ├── metrics.py     # 年化/夏普/回撤/胜率
 │   ├── report.py      # 净值图与交易明细导出
 │   ├── live.py        # 实盘四机制(计划/限价单/持久化/复利)
+│   ├── market_calendar.py # data_source 交易日历(可选,休市直接跳过执行)
 │   ├── notify.py      # Bark 例行任务通知(任务结果/计划/评分/持仓)
 │   ├── sweep.py       # 参数遍历
 │   └── cli.py         # 命令行:fetch/backtest/sweep/plan
-├── tests/             # 161 个单元与集成测试(含确定性无前视检验)
+├── tests/             # 178 个单元与集成测试(含确定性无前视检验)
 ├── docs/
 │   ├── article-notes.md       # 文章知识提取(公式/参数/忠实度对照)
 │   ├── paper-trading-guide.md # 当前虚盘策略完整教程
