@@ -135,7 +135,8 @@ def test_build_notification_contains_plan_scores_and_account(paper_fixture):
     assert title == "✅ ETF轮动｜早间正常"
     assert "状态：正常｜行情 2026-10-16" in body
     assert "【计划】\n计划 2026-10-16｜信号 2026-10-16\n无订单（持有不变/空仓）" in body
-    assert "【评分】\n513100 +1.1641\n512890 +0.4760\n518880 -0.1175\n159949 -1.5226" in body
+    assert "【评分 2026-10-16】\n513100 +1.1641\n512890 +0.4760\n518880 -0.1175\n159949 -1.5226" in body
+    assert "【收盘 2026-10-16】\n512890 红利低波ETF 1.219" in body
     assert "【账户】\n权益 100,913.87\n收益 +913.87（+0.91%）" in body
     assert "【持仓】\n512890 红利低波ETF\n41,767份｜1.197→1.219\n浮盈 +1.84%｜+919元\n止损线 1.133" in body
     assert "【提示】\n513100 门槛溢价 19.6%｜禁新开仓" in body

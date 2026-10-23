@@ -133,6 +133,7 @@ def compute_target_set(
     peaks: dict[str, float],
     stopped: dict[str, int],
     top_streak: dict[str, int],
+    detail: dict | None = None,
 ) -> tuple[frozenset[str], pd.Series]:
     """T 日收盘信号:回测引擎与实盘模块(live.py)共用的唯一实现。
 
@@ -157,6 +158,9 @@ def compute_target_set(
     factor_df = compute_factor_scores(
         window, cfg.bias_ma_n, cfg.momentum_day, cfg.slope_n, cfg.efficiency_n, lookbacks
     )
+    if detail is not None:
+        # 供实盘计划落盘展示(三因子原始分);回测调用方传 None,零开销
+        detail["factor_df"] = factor_df
     scores = combined_score(factor_df, cfg.w_bias, cfg.w_slope, cfg.w_efficiency)
 
     banned = [s for s, ts in stopped.items() if t - ts < cfg.stop_cooldown_days]

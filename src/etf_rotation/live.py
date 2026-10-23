@@ -29,6 +29,7 @@ import pandas as pd
 
 from .backtest import _align, common_dates, compute_target_set
 from .config import StrategyConfig
+from .scoring import zscore
 
 BUY_PRICE_FACTOR = 1.01    # 文章:买入限价 = 现价 * 1.01
 SELL_PRICE_FACTOR = 0.99   # 文章:卖出限价 = 现价 * 0.99
@@ -194,6 +195,7 @@ def make_plan(
         # 的入场确认会被虚假满足,连击 1 天被数成 2 天并生成建仓单。
         # (peaks/stopped 天然幂等,无需处理。)
         streak = {s: max(0, n - 1) for s, n in streak.items()}
+    detail: dict = {}
     target, scores = compute_target_set(
         data, t, cfg,
         positions={s: h.shares for s, h in state.holdings.items()},
@@ -201,7 +203,29 @@ def make_plan(
         peaks=peaks,
         stopped=stopped_idx,
         top_streak=streak,
+        detail=detail,
     )
+    # 三因子原始分 + 横截面 Z 分,落盘供通知/仪表盘展示评分的计算过程
+    factor_df = detail["factor_df"]
+    z = zscore(factor_df)
+
+    def _r(value: float, ndigits: int) -> float | None:
+        return None if pd.isna(value) else round(float(value), ndigits)
+
+    score_detail = {
+        "weights": {"bias": cfg.w_bias, "slope": cfg.w_slope, "efficiency": cfg.w_efficiency},
+        "factors": {
+            s: {
+                "bias": _r(factor_df.loc[s, "bias"], 2),
+                "slope": _r(factor_df.loc[s, "slope"], 2),
+                "efficiency": _r(factor_df.loc[s, "efficiency"], 2),
+                "z_bias": _r(z.loc[s, "bias"], 3),
+                "z_slope": _r(z.loc[s, "slope"], 3),
+                "z_efficiency": _r(z.loc[s, "efficiency"], 3),
+            }
+            for s in factor_df.index
+        },
+    }
 
     # 推进后的风控状态(份额/现金不变,成交由 execute_plan 处理)
     new_state = LiveState(
@@ -242,6 +266,7 @@ def make_plan(
         "cash": round(state.cash, 2),
         "realized_pnl": round(state.realized_pnl, 2),
         "scores": scores.round(4).to_dict(),
+        "score_detail": score_detail,
         "reference_prices": {s: closes[s] for s in symbols},
         "orders": orders,
     }

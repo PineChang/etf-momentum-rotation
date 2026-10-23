@@ -253,7 +253,7 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
     # ---- 待执行计划 + 评分 + 溢价 ----
     plan = store.latest_plan()
     plan_html = "<p class='dim'>无待执行计划</p>"
-    scores_rows = prem_rows = ""
+    scores_rows = prem_rows = scores_caption = ""
     if plan and not store.plan_executed(plan):
         orders = "".join(
             f"<div><span class='badge {o['action'].lower()}'>{o['action']}</span> "
@@ -266,8 +266,27 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
             lag = "、".join(f"{s} {d}" for s, d in plan["data_lag"].items())
             plan_html += (f"<div class='dim'>⚠️ 信号日已被回退:下列标的当日缺 bar——{lag}"
                           f"(该日行情未进入信号,检查数据源)</div>")
+        detail = plan.get("score_detail") or {}
+        factors = detail.get("factors") or {}
+        weights = detail.get("weights") or {}
+        if weights:
+            scores_caption = (f"<p class='sub'>综合 = {weights.get('bias')}×乖离Z "
+                              f"+ {weights.get('slope')}×斜率Z + {weights.get('efficiency')}×效率Z"
+                              f"(三因子先在 4 只标的横截面上做 Z-Score 标准化,再加权)</p>")
         for s, v in sorted(plan.get("scores", {}).items(), key=lambda x: -x[1]):
-            scores_rows += f"<tr><td>{s} {UNIVERSE.get(s, '')}</td><td>{v:+.4f}</td></tr>"
+            f = factors.get(s)
+            if f and all(f.get(k) is not None
+                         for k in ("bias", "slope", "efficiency", "z_bias", "z_slope", "z_efficiency")):
+                scores_rows += (f"<tr><td>{s} {UNIVERSE.get(s, '')}</td>"
+                                f"<td>{f['bias']:+.2f}</td><td>{f['slope']:+.2f}</td>"
+                                f"<td>{f['efficiency']:+.2f}</td>"
+                                f"<td>{f['z_bias']:+.2f}</td><td>{f['z_slope']:+.2f}</td>"
+                                f"<td>{f['z_efficiency']:+.2f}</td>"
+                                f"<td><b>{v:+.4f}</b></td></tr>")
+            else:
+                scores_rows += (f"<tr><td>{s} {UNIVERSE.get(s, '')}</td>"
+                                f"<td colspan='6' class='dim'>—</td>"
+                                f"<td><b>{v:+.4f}</b></td></tr>")
         for s, st in plan.get("premium_check", {}).items():
             prem_rows += (f"<tr><td>{s} {UNIVERSE.get(s, '')}</td>"
                           f"<td>{st['premium'] if st['premium'] is not None else '—'}</td>"
@@ -330,8 +349,8 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
 <table><tr><th>标的</th><th>份额</th><th>成本</th><th>现价</th><th>浮盈亏%</th><th>浮盈亏(元)</th><th>峰值/止损线</th></tr>
 {hold_rows}</table>
 <h2>净值曲线</h2>{chart_html}
-<h2>最新评分</h2>
-<table><tr><th>标的</th><th>综合评分</th></tr>{scores_rows or "<tr><td colspan='2' class='dim'>—</td></tr>"}</table>
+<h2>最新评分</h2>{scores_caption}
+<table><tr><th>标的</th><th>乖离</th><th>斜率</th><th>效率</th><th>乖离Z</th><th>斜率Z</th><th>效率Z</th><th>综合</th></tr>{scores_rows or "<tr><td colspan='8' class='dim'>—</td></tr>"}</table>
 <h2>溢价安检(v3.1 规则:>7% 不开新仓)</h2>
 <table><tr><th>标的</th><th>最新溢价</th><th>净值日期 / 滞后</th></tr>{prem_rows or "<tr><td colspan='3' class='dim'>—</td></tr>"}</table>
 <h2>成交历史</h2>

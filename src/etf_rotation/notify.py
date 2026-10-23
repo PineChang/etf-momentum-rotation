@@ -174,7 +174,30 @@ def _scores_lines(plan: dict | None) -> list[str]:
     if not scores:
         return []
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-    return ["【评分】", *[f"{symbol} {score:+.4f}" for symbol, score in ranked]]
+    asof = (plan or {}).get("data_asof", "")
+    header = f"【评分 {asof}】" if asof else "【评分】"
+    detail = (plan or {}).get("score_detail") or {}
+    factors = detail.get("factors") or {}
+    if not factors:
+        return [header, *[f"{symbol} {score:+.4f}" for symbol, score in ranked]]
+    weights = detail.get("weights") or {}
+    wb = weights.get("bias", 0.3)
+    ws = weights.get("slope", 0.3)
+    we = weights.get("efficiency", 0.4)
+    lines = [f"{header}综合 = {wb}×乖离Z + {ws}×斜率Z + {we}×效率Z(横截面标准化)"]
+    keys = ("bias", "slope", "efficiency", "z_bias", "z_slope", "z_efficiency")
+    for symbol, score in ranked:
+        f = factors.get(symbol)
+        if f is None or any(f.get(k) is None for k in keys):
+            lines.append(f"{symbol} {score:+.4f}")
+            continue
+        lines.append(f"{symbol} 综合 {score:+.4f}")
+        lines.append(f"乖离 {f['bias']:+.2f}(z {f['z_bias']:+.2f})｜"
+                     f"斜率 {f['slope']:+.2f}(z {f['z_slope']:+.2f})｜"
+                     f"效率 {f['efficiency']:+.2f}(z {f['z_efficiency']:+.2f})")
+        lines.append(f"{wb}×({f['z_bias']:+.2f}) + {ws}×({f['z_slope']:+.2f}) "
+                     f"+ {we}×({f['z_efficiency']:+.2f}) = {score:+.4f}")
+    return lines
 
 
 def _premium_lines(plan: dict | None, cfg: StrategyConfig) -> list[str]:
@@ -230,6 +253,29 @@ def _account_lines(store: StateStore, closes: dict[str, float], cfg: StrategyCon
     return lines
 
 
+def _closes_lines(closes: dict[str, float], asof: str) -> list[str]:
+    """四只标的最新收盘价(标题带数据日期),按 UNIVERSE 顺序。"""
+    if not closes:
+        return []
+    lines = [f"【收盘 {asof}】"]
+    for symbol in UNIVERSE:
+        price = closes.get(symbol)
+        if price is not None:
+            lines.append(f"{_display_symbol(symbol)} {price:.3f}")
+    return lines if len(lines) > 1 else []
+
+
+def _bench_lines(store: StateStore) -> list[str]:
+    """策略 vs 沪深300:同期基准收益与超额(复用仪表盘口径,延迟导入避免加载 matplotlib)。"""
+    from .dashboard import _bench_stats
+
+    stats = _bench_stats(store)
+    if stats is None:
+        return []
+    bench_ret, excess = stats
+    return ["【对比沪深300】", f"基准 {bench_ret:+.2%}｜超额 {excess:+.2%}"]
+
+
 def _short_issue(line: str, limit: int = 72) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
@@ -266,8 +312,10 @@ def build_notification(
     sections = [
         plan_lines,
         _scores_lines(plan),
+        _closes_lines(closes, asof),
         _premium_lines(plan, cfg),
         _account_lines(store, closes, cfg),
+        _bench_lines(store),
     ]
     body = [f"状态：{status}｜行情 {asof}"]
     if trading is False:
