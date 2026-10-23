@@ -20,6 +20,8 @@ case "${1:-}" in
     "$PY" -m etf_rotation.cli fetch >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli plan  >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli dashboard >> "$LOG" 2>&1
+    # 数据校验核准:放 dashboard 后(权益自愈先执行),notify 前(问题进 Bark 摘要)
+    "$PY" -m etf_rotation.cli validate --cross >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli notify --task evening >> "$LOG" 2>&1
     ;;
   morning)
@@ -28,6 +30,7 @@ case "${1:-}" in
     "$PY" -m etf_rotation.cli plan  >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli execute >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli dashboard >> "$LOG" 2>&1
+    "$PY" -m etf_rotation.cli validate >> "$LOG" 2>&1
     "$PY" -m etf_rotation.cli notify --task morning >> "$LOG" 2>&1
     ;;
   *)

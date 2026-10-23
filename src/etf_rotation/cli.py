@@ -188,6 +188,16 @@ def _premium_snapshot(cfg: StrategyConfig, data: dict, data_asof: str) -> dict |
 def cmd_plan(args) -> None:
     cfg = _cfg_from_args(args)
     data = _with_premium(cfg, fetch_universe(list(UNIVERSE)))
+    # 数据质量门:结构损坏(重复日期/非法四价/异常涨跌/日历错乱)直接拒绝出计划,
+    # 宁可当日无计划也不在坏数据上算信号;warning(缺 bar/日期不齐)走 data_lag 降级
+    from .validate import format_report, has_critical, validate_all
+
+    issues = validate_all(data)
+    if issues:
+        print(format_report(issues))
+    if has_critical(issues):
+        print("Error: 数据校验未通过,拒绝生成计划——请先修复行情缓存(cli validate 复核)")
+        raise SystemExit(1)
     store = StateStore(STATE_DIR)
     state = store.load_state(cfg.initial_cash)
     plan, new_state = make_plan(data, state, cfg)
@@ -274,6 +284,22 @@ def cmd_execute(args) -> None:
               f"与真实限价单的持续挂单行为可能有偏差(已记录 signal_age_days)")
     print(f"现金 {new_state.cash:.2f} | 持仓 {sorted(new_state.holdings) or '空仓'} "
           f"| 累计已实现盈亏 {new_state.realized_pnl:.2f}")
+
+
+def cmd_validate(args) -> None:
+    """数据校验核准:离线结构/日历/对齐/权益账;--cross 追加东财在线逐分比对。"""
+    from .validate import (crosscheck_with_em, format_report, has_critical,
+                           load_cached_universe, validate_all)
+
+    data = load_cached_universe()
+    store = StateStore(STATE_DIR)
+    state = store.load_state()
+    issues = validate_all(data, store, state)
+    if args.cross:
+        issues.extend(crosscheck_with_em(list(UNIVERSE)))
+    print(format_report(issues))
+    if has_critical(issues):
+        raise SystemExit(1)
 
 
 def cmd_dashboard(args) -> None:
@@ -374,6 +400,9 @@ def main() -> None:
     sub.add_parser("execute", help="开盘按真实开盘价成交最近一份计划(虚盘)")
     sub.add_parser("status", help="查看当前持仓/权益/风控状态/最近成交")
 
+    p_val = sub.add_parser("validate", help="数据校验核准(离线结构/日历/对齐/权益账;--cross 在线比对东财)")
+    p_val.add_argument("--cross", action="store_true", help="在线交叉核准:未复权收盘与东财源逐分比对")
+
     p_dash = sub.add_parser("dashboard", help="生成 HTML 虚盘仪表盘(state/dashboard.html)")
     p_dash.add_argument("--open", action="store_true", help="生成后在浏览器打开")
 
@@ -383,6 +412,7 @@ def main() -> None:
     args = parser.parse_args()
     {"fetch": cmd_fetch, "backtest": cmd_backtest, "sweep": cmd_sweep,
      "plan": cmd_plan, "execute": cmd_execute, "status": cmd_status,
+     "validate": cmd_validate,
      "dashboard": cmd_dashboard, "notify": cmd_notify}[args.command](args)
 
 
