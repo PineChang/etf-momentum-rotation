@@ -249,6 +249,38 @@ class TestDashboard:
         lines = (tmp_path / "equity.csv").read_text().splitlines()
         assert len(lines) == 2           # header + 今日一行
 
+    def test_heal_equity_tail_rewrites_stale_row(self, tmp_path):
+        """盘中价冻结的历史行被最终收盘重写;成交边界之前的行不动;二次运行幂等。"""
+        import pandas as pd
+        from etf_rotation.dashboard import heal_equity_tail
+
+        store = StateStore(tmp_path)
+        store.save_state(LiveState(
+            cash=50_000.0,
+            holdings={"512890": Holding("512890", 1000.0, 1.197, 1.236)},
+            realized_pnl=0.0))
+        store.append_log({"type": "fill", "plan_date": "2026-10-07",
+                          "data_asof": "2026-10-07",
+                          "fills": [{"action": "BUY", "symbol": "512890",
+                                     "fill_price": 1.197}]})
+        (tmp_path / "equity.csv").write_text(
+            "date,cash,market_value,total\n"
+            "2026-10-06,100000.00,0.00,100000.00\n"   # 成交边界前:不应被重写
+            "2026-10-08,50000.00,1200.00,51200.00\n"  # 冻结行:1000 份按盘中价 1.20
+        )
+        df = pd.DataFrame({"date": pd.to_datetime(["2026-10-06", "2026-10-08"]),
+                           "open": 1.2, "high": 1.2, "low": 1.2,
+                           "close": [1.19, 1.21], "volume": 1e6})
+        state = store.load_state()
+        assert heal_equity_tail(store, state, {"512890": df}) == 1
+        rows = pd.read_csv(tmp_path / "equity.csv", parse_dates=["date"])
+        row8 = rows[rows["date"] == "2026-10-08"].iloc[0]
+        assert row8["market_value"] == pytest.approx(1210.0)   # 1000 × 收盘 1.21
+        assert row8["total"] == pytest.approx(51210.0)
+        row6 = rows[rows["date"] == "2026-10-06"].iloc[0]
+        assert row6["total"] == pytest.approx(100000.0)        # 边界前保持原样
+        assert heal_equity_tail(store, state, {"512890": df}) == 0   # 幂等
+
 
 class TestDualTrack:
     """双轨对照:compare_fills 配对与价差,gm 快照渲染,未配置占位。"""

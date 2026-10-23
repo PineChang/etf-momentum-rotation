@@ -184,7 +184,7 @@ def _scores_lines(plan: dict | None) -> list[str]:
     wb = weights.get("bias", 0.3)
     ws = weights.get("slope", 0.3)
     we = weights.get("efficiency", 0.4)
-    lines = [f"{header}综合 = {wb}×乖离Z + {ws}×斜率Z + {we}×效率Z(横截面标准化)"]
+    lines = [header]
     keys = ("bias", "slope", "efficiency", "z_bias", "z_slope", "z_efficiency")
     for symbol, score in ranked:
         f = factors.get(symbol)
@@ -192,11 +192,11 @@ def _scores_lines(plan: dict | None) -> list[str]:
             lines.append(f"{symbol} {score:+.4f}")
             continue
         lines.append(f"{symbol} 综合 {score:+.4f}")
-        lines.append(f"乖离 {f['bias']:+.2f}(z {f['z_bias']:+.2f})｜"
-                     f"斜率 {f['slope']:+.2f}(z {f['z_slope']:+.2f})｜"
-                     f"效率 {f['efficiency']:+.2f}(z {f['z_efficiency']:+.2f})")
-        lines.append(f"{wb}×({f['z_bias']:+.2f}) + {ws}×({f['z_slope']:+.2f}) "
-                     f"+ {we}×({f['z_efficiency']:+.2f}) = {score:+.4f}")
+        # 手机端窄屏:一因子一行(原始分｜Z分｜权重),三行竖排相加即综合分,
+        # 不再拼长公式行(Bark 里长行换行后很难读)
+        lines.append(f"  乖离 {f['bias']:+.2f}｜Z {f['z_bias']:+.2f}｜×{wb}")
+        lines.append(f"  斜率 {f['slope']:+.2f}｜Z {f['z_slope']:+.2f}｜×{ws}")
+        lines.append(f"  效率 {f['efficiency']:+.2f}｜Z {f['z_efficiency']:+.2f}｜×{we}")
     return lines
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -62,6 +63,70 @@ def record_equity(store: StateStore, cash: float, market_value: float) -> None:
         rows = [x for x in f.read_text().splitlines()[1:] if not x.startswith(today)]
     rows.append(f"{today},{cash:.2f},{market_value:.2f},{cash + market_value:.2f}")
     f.write_text("date,cash,market_value,total\n" + "\n".join(rows) + "\n")
+
+
+def heal_equity_tail(store: StateStore, state, data: dict[str, pd.DataFrame]) -> int:
+    """自愈:用最终收盘价重写最近几行权益,返回修正行数。
+
+    场景:某天只有盘中任务跑过(晚间 cron 被 macOS 睡眠错过),当天权益按
+    盘中价/昨收冻结;次日任务只覆盖次日自己的行,旧行永远带着误差(如
+    2026-10-15)。本函数在每次生成仪表盘时以当前持仓重估历史行。
+
+    边界:从尾部向前扫描,仅处理最后一笔成交(plan_date)之后的行——更早的
+    行份额/现金已不同,无法用当前持仓重估,扫描到该边界即停(成交边界是
+    天然的最大行数上限)。数据未修订的行重估结果相同,天然幂等。
+    """
+    f = store.dir / "equity.csv"
+    if not f.exists() or not state.holdings:
+        return 0
+    df = pd.read_csv(f, parse_dates=["date"])
+    if df.empty:
+        return 0
+    last_fill_plan = None
+    if store.log_file.exists():
+        for line in store.log_file.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") == "fill" and rec.get("plan_date"):
+                d = pd.Timestamp(rec["plan_date"])
+                if last_fill_plan is None or d > last_fill_plan:
+                    last_fill_plan = d
+    closes = {}
+    for symbol in state.holdings:
+        df_s = data.get(symbol)
+        if df_s is None or df_s.empty:
+            return 0
+        closes[symbol] = df_s.set_index("date")["close"].sort_index()
+
+    today = pd.Timestamp.today().normalize()
+    fixed = 0
+    for idx in df.index[::-1]:
+        d = df.loc[idx, "date"]
+        if d >= today:
+            continue                          # 当天行由 record_equity 覆盖
+        if last_fill_plan is not None and d <= last_fill_plan:
+            break                             # 份额/现金边界,更早的行无法重估
+        mv = 0.0
+        for symbol, h in state.holdings.items():
+            s = closes[symbol]
+            s = s[s.index <= d]
+            if s.empty or s.index[-1] < d:
+                mv = None                     # 该标的当日 bar 仍缺,不重估
+                break
+            mv += h.shares * float(s.iloc[-1])
+        if mv is None:
+            continue
+        total = state.cash + mv
+        if abs(total - df.loc[idx, "total"]) > 0.01:
+            df.loc[idx, "cash"] = round(state.cash, 2)
+            df.loc[idx, "market_value"] = round(mv, 2)
+            df.loc[idx, "total"] = round(total, 2)
+            fixed += 1
+    if fixed:
+        df.to_csv(f, index=False, float_format="%.2f", date_format="%Y-%m-%d")
+    return fixed
 
 
 def _bench_nav(store: StateStore, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series | None:
@@ -135,6 +200,53 @@ def _equity_chart(store: StateStore) -> str:
     fig.savefig(buf, format="png", dpi=130, facecolor="#1a2129")
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def _universe_compare_chart(store: StateStore, data: dict[str, pd.DataFrame]) -> str:
+    """策略 + 4 只标的 + 沪深300 的三面板对比图(variant-compare-chart skill)→ base64 PNG。
+
+    区间 = 虚盘起点至今,各曲线首日归一。沪深300 用本地基准缓存(_bench_nav 口径,
+    显式传第一条曲线走灰色参照约定),不依赖 skill 默认的 duckdb 数据源,保证与上方
+    基准卡口径一致且离线可画。同时落盘 output/universe_compare.png 备查。
+    """
+    f = store.dir / "equity.csv"
+    if not f.exists() or len(f.read_text().splitlines()) < 3:
+        return ""
+    df = pd.read_csv(f, parse_dates=["date"])
+    start, end = df["date"].iloc[0], df["date"].iloc[-1]
+    strat = df.set_index("date")["total"]
+    strat = strat / strat.iloc[0]
+
+    curves: list[tuple[str, pd.Series]] = []
+    bench = _bench_nav(store, start, end)
+    if bench is not None:
+        curves.append(("沪深300", bench))
+    # 策略 ≠ 全仓持有某只 ETF:标签注明现金占比,避免与标的曲线直接比较时误解
+    cash_pct = float(df["cash"].iloc[-1] / df["total"].iloc[-1])
+    curves.append((f"策略(现金{cash_pct:.0%})", strat))
+    for symbol, name in UNIVERSE.items():
+        df_s = data.get(symbol)
+        if df_s is None or df_s.empty:
+            continue
+        s = df_s.set_index("date")["close"].sort_index()
+        s = s[(s.index >= start) & (s.index <= end)]
+        if len(s) >= 2:
+            curves.append((f"{symbol} {name}", s / s.iloc[0]))
+    if len(curves) < 3:
+        return ""
+
+    skill_scripts = Path.home() / ".claude/skills/variant-compare-chart/scripts"
+    if str(skill_scripts) not in sys.path:
+        sys.path.insert(0, str(skill_scripts))
+    from plot_variants import plot_variant_comparison  # noqa: PLC0415
+
+    out = Path(__file__).resolve().parents[2] / "output" / "universe_compare.png"
+    plot_variant_comparison(
+        curves, out,
+        title=f"策略 vs 标的 vs 沪深300(自 {start.date()},对数轴)",
+        base_csi300=False,
+    )
+    return base64.b64encode(out.read_bytes()).decode()
 
 
 def _bench_stats(store: StateStore) -> tuple[float, float] | None:
@@ -227,6 +339,9 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
 
     mv = sum(h.shares * closes.get(s, 0.0) for s, h in state.holdings.items())
     total = state.cash + mv
+    healed = heal_equity_tail(store, state, data)
+    if healed:
+        print(f"权益自愈: 重写 {healed} 行(此前按盘中价/昨收冻结)")
     record_equity(store, state.cash, mv)
 
     # ---- 持仓表 ----
@@ -317,6 +432,9 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
     chart = _equity_chart(store)
     chart_html = f"<img class='curve' src='data:image/png;base64,{chart}'>" if chart else \
         "<p class='dim'>净值数据积累中(明日开始有曲线)</p>"
+    compare = _universe_compare_chart(store, data)
+    compare_html = f"<img class='curve' src='data:image/png;base64,{compare}'>" if compare else \
+        "<p class='dim'>数据不足,暂无法生成标的对比图</p>"
 
     principal = total - state.realized_pnl
     bench_cards = ""
@@ -349,6 +467,7 @@ def render_dashboard(store: StateStore, data: dict[str, pd.DataFrame], out_path:
 <table><tr><th>标的</th><th>份额</th><th>成本</th><th>现价</th><th>浮盈亏%</th><th>浮盈亏(元)</th><th>峰值/止损线</th></tr>
 {hold_rows}</table>
 <h2>净值曲线</h2>{chart_html}
+<h2>标的对比(对数轴净值 + 回撤 + 指标表)</h2>{compare_html}
 <h2>最新评分</h2>{scores_caption}
 <table><tr><th>标的</th><th>乖离</th><th>斜率</th><th>效率</th><th>乖离Z</th><th>斜率Z</th><th>效率Z</th><th>综合</th></tr>{scores_rows or "<tr><td colspan='8' class='dim'>—</td></tr>"}</table>
 <h2>溢价安检(v3.1 规则:>7% 不开新仓)</h2>
