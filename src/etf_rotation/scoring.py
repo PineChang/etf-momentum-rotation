@@ -1,6 +1,6 @@
 """Z-Score 标准化 + 加权综合评分 + 1.5 倍调仓阈值轮动选择。
 
-对应文章第 2、3 节:
+本模块负责:
 - 三因子量纲不同,先各自做 Z-Score 标准化(均值 0、标准差 1),再加权,
   防止某个因子因数值过大主导最终得分。
 - 调仓阈值:挑战者得分必须超过当前持仓得分的 threshold 倍(默认 1.5)才调仓,
@@ -25,7 +25,7 @@ def zscore(factor_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def combined_score(factor_df: pd.DataFrame, w_bias: float, w_slope: float, w_efficiency: float) -> pd.Series:
-    """标准化后按文章权重加权:默认 乖离0.3 / 斜率0.3 / 效率0.4。"""
+    """标准化后按既定权重加权:默认 乖离0.3 / 斜率0.3 / 效率0.4。"""
     z = zscore(factor_df)
     return w_bias * z["bias"] + w_slope * z["slope"] + w_efficiency * z["efficiency"]
 
@@ -33,7 +33,7 @@ def combined_score(factor_df: pd.DataFrame, w_bias: float, w_slope: float, w_eff
 def _beats(score_held: float, score_challenger: float, threshold: float) -> bool:
     """阈值比较:挑战者须超出在持者 |score|×(threshold-1)。
 
-    得分为正时等价于文章的 challenger > held * threshold;
+    得分为正时等价于 challenger > held * threshold;
     得分为负时原乘法形式会反向放行(×1.5 让不等式更易满足),
     这里改为对称语义——负分区同样要求显著超出,而非必然切换。
     恰好达界不算"超过",不切换。

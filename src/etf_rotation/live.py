@@ -1,10 +1,10 @@
 """实盘信号模块 —— 与回测共用同一信号引擎(backtest.compute_target_set)。
 
-复刻文章第 4 节 QMT 实盘的四机制,并完整实现 V3 风控(双持仓/移动止损/
+实盘四机制,并完整实现 V3 风控(双持仓/移动止损/
 动量过滤/止盈/禁买期/入场确认):
 
 1. 时间管理:盘前(8:00)生成当日交易计划提前查看,开盘(9:30)执行。
-   调度由外部(crontab / QMT 定时器)触发,本模块提供 make_plan / execute_plan 两个入口。
+   调度由外部(crontab / 定时器)触发,本模块提供 make_plan / execute_plan 两个入口。
 2. 持久化:持仓、现金、风控状态(禁买名单/评分连击)、交易日志落地本地 JSON,
    程序重启后恢复。
 3. 限价单:买入价 = 现价 * 1.01,卖出价 = 现价 * 0.99(现价取最新收盘;
@@ -14,7 +14,7 @@
 信号一致性保证:目标持仓的计算调用 backtest.compute_target_set——与回测引擎
 逐行相同的实现,不会出现"回测一套代码、实盘另一套"。
 
-本模块不含任何券商接口;对接 QMT/Ptrade 时只需把 execute_plan 里的
+本模块不含任何券商接口;对接券商客户端时只需把 execute_plan 里的
 成交价来源替换为券商回报,计划生成与状态管理保持不变。
 """
 
@@ -31,8 +31,8 @@ from .backtest import _align, common_dates, compute_target_set
 from .config import StrategyConfig
 from .scoring import zscore
 
-BUY_PRICE_FACTOR = 1.01    # 文章:买入限价 = 现价 * 1.01
-SELL_PRICE_FACTOR = 0.99   # 文章:卖出限价 = 现价 * 0.99
+BUY_PRICE_FACTOR = 1.01    # 买入限价 = 现价 * 1.01
+SELL_PRICE_FACTOR = 0.99   # 卖出限价 = 现价 * 0.99
 
 
 @dataclass
@@ -149,7 +149,7 @@ def make_plan(
     state: LiveState,
     cfg: StrategyConfig | None = None,
 ) -> tuple[dict, LiveState]:
-    """盘前计划(对应文章"8点打印当日交易计划")。
+    """盘前计划(盘前打印当日交易计划)。
 
     用截至最新交易日的收盘数据,经与回测共用的信号引擎计算目标持仓,
     给出 SELL/BUY 限价单。同时返回更新风控状态后的 LiveState(锚点、
@@ -300,7 +300,7 @@ def execute_plan(
     fill_prices: dict[str, float],
     cfg: StrategyConfig,
 ) -> LiveState:
-    """开盘执行(对应文章"9点半实际交易")。
+    """开盘执行(开盘按计划成交)。
 
     fill_prices: {symbol: 实际成交价} —— 对接实盘时由券商回报提供,
     回测/模拟时可用开盘价;未成交的持仓按计划参考价估值。

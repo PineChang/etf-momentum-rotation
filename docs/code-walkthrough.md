@@ -66,11 +66,11 @@
 ```python
 @dataclass(frozen=True)
 class StrategyConfig:
-    momentum_day: int = 25            # 文章给出的乖离回归窗口
-    w_bias: float = 0.3               # 文章给出的三因子权重
+    momentum_day: int = 25            # 乖离回归窗口
+    w_bias: float = 0.3               # 三因子权重
     ...
-    rebalance_threshold: float = 1.5  # 文章给出的调仓阈值
-    # —— 风控扩展(本项目改良,默认关闭 = 忠实原文)——
+    rebalance_threshold: float = 1.5  # 调仓阈值
+    # —— 风控扩展(本项目改良,默认关闭 = 基础版)——
     min_momentum: float | None = None
     trailing_stop: float | None = None
     n_hold: int = 1
@@ -82,8 +82,8 @@ class StrategyConfig:
 - **frozen=True(不可变)**:配置创建后不能改,杜绝"回测跑到一半参数被改"的隐患。
   要变体就用 `dataclasses.replace(cfg, stop_loss=0.06)` 生成新对象——
   实验矩阵里几十个变体都是这样派生的;
-- **默认值 = 原文策略**:所有风控开关默认 `None`/1(关闭),
-  `StrategyConfig()` 空手实例化出来的就是 100% 忠于文章的策略。
+- **默认值 = 基础版策略**:所有风控开关默认 `None`/1(关闭),
+  `StrategyConfig()` 空手实例化出来的就是基础版。
   改良是"显式打开开关",不是"改掉默认";
 - **`warmup_bars` 属性**(`config.py:45`):算出因子需要的最少历史 bar 数
   (`max(ma_n + momentum_day, slope_n, efficiency_n)`),
@@ -95,7 +95,7 @@ class StrategyConfig:
 
 ### 3.1 `_ols_slope_r2`(factors.py:32)— 为什么不用 sklearn
 
-文章原文用 `sklearn.linear_model.LinearRegression`,本项目用 numpy 手写一元 OLS:
+示例代码用 `sklearn.linear_model.LinearRegression`,本项目用 numpy 手写一元 OLS:
 
 ```python
 ss_xy = ((x - x.mean()) * (y - y.mean())).sum()
@@ -110,7 +110,7 @@ r_squared = 1 - ss_res / ss_tot          # 决定系数
 
 ### 3.2 三个因子函数
 
-| 函数 | 文章公式 | 输入 | 输出语义 |
+| 函数 | 公式 | 输入 | 输出语义 |
 |------|---------|------|---------|
 | `bias_momentum_score` (factors.py:49) | 乖离率序列归一化后回归,斜率×10000 | 收盘价 + 两个窗口 | 偏离在加剧吗 |
 | `slope_momentum_score` (factors.py:64) | 归一化价格回归,10000×斜率×R² | 收盘价 + 窗口 | 涨得多×涨得稳 |
@@ -142,7 +142,7 @@ return momentum * efficiency_ratio
 
 ## 四、scoring.py — 标准化、加权与选股
 
-80 行,四个函数,对应文章第 2、3 节。
+80 行,四个函数,覆盖三因子计算。
 
 ### 4.1 `zscore`(scoring.py:15)— 横截面标准化
 
@@ -163,7 +163,7 @@ return (factor_df - mean) / std
 
 ### 4.3 `select_target` / `select_targets`(scoring.py:33 / 53)— 阈值选股
 
-单持仓版(文章原文逻辑):
+单持仓版(基础版逻辑):
 
 ```python
 if current is None:      return best          # 空仓 → 买第一
@@ -177,12 +177,12 @@ return current                                  # 否则不动
 1. 先按排名把 n 个槽位填满(**空槽直接补位**,无需过阈值);
 2. 再循环做"换血":挑战者须**显著强于**在持最弱者,才替换。
 
-边界语义都被测试锁死:**恰等于 1.5 倍不换**(文章说"超过")、全 NaN 时维持现状。
+边界语义都被测试锁死:**恰等于 1.5 倍不换**(定义是"超过")、全 NaN 时维持现状。
 
-> ⚠️ 阈值比较在**负分区**不是一个"照抄文章"的选择,而是踩过的坑:文章的字面写法
+> ⚠️ 阈值比较在**负分区**不是一个"照抄"的选择,而是踩过的坑:字面写法
 > `挑战者 > 在持者 × 1.5` 在在持者得分为负时**反向放行**(`-0.9 > -1.5` 成立),
 > "防换血"机制失效,实测 1901 次比较中有 54 次换到了**评分更低**的标的。
-> 现改为 `_beats`:挑战者须超出 `|在持者| × (阈值-1)`——正分区与文章公式逐位等价,
+> 现改为 `_beats`:挑战者须超出 `|在持者| × (阈值-1)`——正分区与公式逐位等价,
 > 负分区同样要求显著超出。见 `docs/audit-report.md` §六 R1。
 
 ## 五、data.py — 数据获取与缓存
@@ -254,10 +254,10 @@ cash = cfg.initial_cash
 slot = total_equity / cfg.n_hold
 ```
 
-- `n_hold=1` 时退化为原文的全仓单押(重构后有逐点一致性的验证);
+- `n_hold=1` 时退化为基础版的全仓单押(重构后有逐点一致性的验证);
 - `n_hold=2` 时每槽 50%,空槽的钱留在 cash(绝对动量过滤把候选过滤光时自然形成半仓现金);
 - 卖出回款进 cash,买入从 cash 出——**复利是记账的自然结果**(盈亏自动并入下一份本金),
-  对应文章"每次调仓后把之前持仓盈亏相加"。
+  对应"每次调仓后把之前持仓盈亏相加"。
 
 ### 6.4 风控扩展的挂载点(收盘信号段)
 
@@ -332,7 +332,7 @@ for _, t in trades.sort_values("date").iterrows():
 
 ## 八、live.py — 实盘桥(盘前计划与状态持久化)
 
-210 行,对应文章第 4 节的四个实盘机制,**平台无关**(不绑 QMT/Ptrade)。
+210 行,四个实盘机制,**平台无关**(不绑券商接口)。
 
 ### 8.1 三段式
 
@@ -344,7 +344,7 @@ store.save_state(final)                              # 收盘后:状态落盘
 
 - **`make_plan`**:目标持仓**调用 `backtest.compute_target_set`**——与回测引擎逐行同源的
   唯一实现,不会出现"回测一套、实盘另一套";订单带限价(买=现价×1.01,卖=现价×0.99,
-  文章原参数)和**人类可读的换仓理由**;同时返回推进后的 `LiveState`(持仓期峰值锚点、
+  既定参数)和**人类可读的换仓理由**;同时返回推进后的 `LiveState`(持仓期峰值锚点、
   禁买名单、评分连击);
 - **`execute_plan`**:接收 `fill_prices`(实盘来自券商回报,模拟用开盘价),
   卖出盈亏累加进 `realized_pnl`,回款全额再投(复利)。**非幂等**:同一份 plan 只能执行一次,
@@ -358,7 +358,7 @@ store.save_state(final)                              # 收盘后:状态落盘
 > 使移动止损退化为"锚定开仓价的固定止损";②`confirm_days≥2` 因连击不落盘而永久空仓。
 > 详见 `docs/audit-report.md` §9.2 P0-1。
 
-**对接真实券商时只需改一处**:把 `execute_plan` 的 `fill_prices` 换成 QMT/Ptrade 的
+**对接真实券商时只需改一处**:把 `execute_plan` 的 `fill_prices` 换成 券商客户端的
 成交回报。计划生成、风控、状态管理全部原样复用。
 
 ## 九、sweep.py / cli.py — 参数遍历与命令行
@@ -367,7 +367,7 @@ store.save_state(final)                              # 收盘后:状态落盘
 
 `weight_grid`(sweep.py:18)在单纯形上生成权重组合(w1+w2+w3=1,步长可调),
 `sweep` 做权重×阈值全网格回测,按夏普降序输出。
-对应文章"参数是聚宽遍历出来的"——也保留文章的警告:遍历最优是双刃剑。
+对应"参数是遍历出来的"——也保留项目对参数遍历的警告:遍历最优是双刃剑。
 
 ### 9.2 cli.py(124 行)— 四个子命令
 
@@ -392,7 +392,7 @@ tests/
 ├── test_live.py           计划/限价单/持久化/重启恢复/峰值锚点推进/槽位等权/重放保护
 ├── test_risk_control.py   空仓/过滤/止损/禁买/移动止损/双持仓/溢价规则
 ├── test_lookahead.py      **确定性无前视**:T 日信号必须与 T+1 及以后行情无关
-├── test_config.py         锁住文章披露参数(0.3/0.3/0.4、MOMENTUM_DAY=25、阈值 1.5…)
+├── test_config.py         锁住既定参数(0.3/0.3/0.4、MOMENTUM_DAY=25、阈值 1.5…)
 └── test_sweep.py          权重网格的单纯形约束
 ```
 
@@ -433,7 +433,7 @@ pip install -e . && etf-rotation <command>            # 方式二:装成命令(p
 # 数据(首次全量,之后增量;东财限流时加 NO_PROXY 绕过失效的系统代理)
 NO_PROXY='*' PYTHONPATH=src python -m etf_rotation.cli fetch
 
-# 回测:原文策略
+# 回测:基础版策略
 PYTHONPATH=src python -m etf_rotation.cli backtest
 
 # 回测:推荐改良(V3.1 = 双持仓 + 移动止损 + 动量过滤 + 止盈 + 溢价过滤)
@@ -459,7 +459,7 @@ PYTHONPATH=src python -m etf_rotation.cli plan
 ```
 
 输出 JSON:当前持仓、目标、四只 ETF 的原始三因子分与综合分、限价订单(含换仓理由),
-同时写入 `state/trade_log.jsonl`。可用 crontab 定时(对应文章 8:00 打计划):
+同时写入 `state/trade_log.jsonl`。可用 crontab 定时(对应 8:00 打计划):
 
 ```cron
 0 8 * * 1-5 cd /path/to/etf-momentum-rotation && NO_PROXY='*' PYTHONPATH=src /path/to/.venv/bin/python -m etf_rotation.cli plan >> state/cron.log 2>&1

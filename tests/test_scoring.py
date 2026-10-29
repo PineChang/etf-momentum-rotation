@@ -49,8 +49,8 @@ class TestCombinedScore:
 class TestBeats:
     """调仓阈值语义(审计 R1:负分区不得退化)。"""
 
-    def test_positive_region_equivalent_to_article_multiple(self):
-        """正分区必须与文章的 "挑战者 > 在持者 × 阈值" 完全等价。"""
+    def test_positive_region_equivalent_to_multiple(self):
+        """正分区必须与 "挑战者 > 在持者 × 阈值" 完全等价。"""
         for held in (0.5, 1.0, 2.0):
             for thr in (1.2, 1.5, 2.0):
                 assert _beats(held, held * thr, thr) is False        # 恰好达界不算超过

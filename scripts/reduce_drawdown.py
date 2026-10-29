@@ -19,8 +19,8 @@ WINDOW_START = pd.Timestamp("2025-09-28")
 OUT = Path(__file__).resolve().parents[1] / "output" / "drawdown_experiments.csv"
 
 EXPERIMENTS: dict[str, dict] = {
-    # ---- 基线(忠实原文) ----
-    "baseline(原文)": {},
+    # ---- 基线(基础版) ----
+    "baseline(基础版)": {},
     # ---- 调仓阈值 ----
     "thr=2.0": {"rebalance_threshold": 2.0},
     "thr=2.5": {"rebalance_threshold": 2.5},

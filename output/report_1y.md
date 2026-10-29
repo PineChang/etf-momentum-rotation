@@ -1,6 +1,6 @@
 # 改良策略最近一年报告(2025-09-28 → 2026-09-28)
 
-参数:V3 = `n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25`(其余同原文默认)
+参数:V3 = `n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25`(其余同基础版默认)
 初始资金:100,000 元 | 佣金:双边 0.0100% | 数据:akshare 前复权
 
 ![每日明细](report_1y_daily.png)

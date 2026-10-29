@@ -1,6 +1,6 @@
-"""三因子动量 —— 忠实复现微信文章《ETF三因子动量轮动策略》的公式。
+"""三因子动量 —— 三因子轮动策略的公式。
 
-文章原文(伪代码)→ 本实现:
+原始公式(伪代码)→ 本实现:
 
 1. 乖离动量因子 (bias_momentum_score)
    bias = close / close.rolling(BIAS_N, min_periods=1).mean()
@@ -19,7 +19,7 @@
    efficiency_ratio = |log(pivot[-1]) - log(pivot[0])| / sum(|diff(log(pivot))|)
    score = momentum * efficiency_ratio
 
-文章用 sklearn.linear_model.LinearRegression;这里用 numpy 最小二乘,
+示例代码用 sklearn.linear_model.LinearRegression;这里用 numpy 最小二乘,
 数学上等价(普通最小二乘闭式解),减少一个重依赖。
 """
 

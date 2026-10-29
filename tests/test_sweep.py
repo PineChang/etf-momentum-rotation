@@ -21,4 +21,4 @@ class TestWeightGrid:
         g = weight_grid(0.2)
         assert (1.0, 0.0, 0.0) in g            # 纯乖离
         assert (0.0, 0.0, 1.0) in g            # 纯效率
-        assert (0.4, 0.2, 0.4) in g            # 包含文章权重附近
+        assert (0.4, 0.2, 0.4) in g            # 包含既定权重附近

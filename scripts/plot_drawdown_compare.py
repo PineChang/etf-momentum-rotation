@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """重绘 README 的"降回撤三阶段"对比图(output/drawdown_compare.png)。
 
-三条曲线 = 三阶段:原文策略 → 单持仓+风控 → 双持仓推荐(V3.1)。
+三条曲线 = 三阶段:基础版策略 → 单持仓+风控 → 双持仓推荐(V3.1)。
 图例数字由 perf_metrics 从当次回测现算,永远不会与曲线脱节。
 
 运行:NO_PROXY='*' PYTHONPATH=src python scripts/plot_drawdown_compare.py
@@ -27,7 +27,7 @@ plt.rcParams["font.family"] = ["PingFang SC", "Arial Unicode MS", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 
 STAGES = [
-    ("原文策略", {}, "#7f7f7f"),
+    ("基础版策略", {}, "#7f7f7f"),
     # trail8+stop6+thr2+min_mom+confirm3(README 三档方案表的"单持仓+风控"行)
     ("单持仓+风控", dict(trailing_stop=0.08, stop_loss=0.06, rebalance_threshold=2.0,
                          min_momentum=0.0, confirm_days=3), "#2980b9"),

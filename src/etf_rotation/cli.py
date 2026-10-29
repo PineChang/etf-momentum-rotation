@@ -34,7 +34,7 @@ PRESETS: dict[str, dict] = {
     # V3.1 = V3 + 溢价率入场门槛(当前推荐,2026-09-29 采纳,见 audit-report 8.1/十节):
     # 开仓前安检——场内价对单位净值溢价 >7% 不开新仓(只拦新买,不踢已有持仓);
     # 513100 常年暂停申购,高溢价期买入存在溢价坍塌风险。
-    # V3 = 项目验证过的原推荐配置(无溢价过滤);original = 忠实原文。
+    # V3 = 项目验证过的原推荐配置(无溢价过滤);original = 基础版。
     "v3.1": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25, premium_max=0.07),
     "v3": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0, take_profit=0.25),
     "v2": dict(n_hold=2, trailing_stop=0.08, min_momentum=0.0),
@@ -64,7 +64,7 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--w-efficiency", type=float)
     p.add_argument("--rebalance-threshold", type=float)
     p.add_argument("--commission", type=float)
-    # 风控扩展(默认关闭 = 忠实原文)
+    # 风控扩展(默认关闭 = 基础版)
     p.add_argument("--min-momentum", type=float, help="绝对动量过滤:近slope_n天收益≤该值则空仓")
     p.add_argument("--ma-filter-n", type=int, help="均线过滤窗口")
     p.add_argument("--stop-loss", type=float, help="止损比例,如 0.06")
@@ -72,7 +72,7 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--trailing-stop", type=float, help="移动止损:自持仓期间最高价回落比例,如 0.08")
     p.add_argument("--take-profit", type=float, help="固定止盈:对成本价浮盈比例,如 0.25")
     p.add_argument("--confirm-days", type=int, help="入场确认天数:空仓时须连续N天评分第一才建仓")
-    p.add_argument("--n-hold", type=int, help="持仓只数:1=原文全仓单标的,2=双标的等权分散")
+    p.add_argument("--n-hold", type=int, help="持仓只数:1=全仓单标的,2=双标的等权分散")
     p.add_argument("--premium-max", type=float, help="溢价率入场门槛:场内价对单位净值溢价超过该值不开新仓(如 0.07),不踢已有持仓;仅 v3.1 预设默认开启")
 
 
@@ -135,7 +135,7 @@ def cmd_sweep(args) -> None:
     df.to_csv(out, index=False)
     print(df.head(15).to_string(index=False))
     print(f"\n完整结果: {out}  (共 {len(df)} 组)")
-    print("提示(文章原话):参数最优存在过拟合风险,不要太执着于调参。")
+    print("提示:参数最优存在过拟合风险,不要太执着于调参。")
 
 
 def _decision_premium_check(check: dict | None) -> dict | None:
@@ -221,7 +221,7 @@ def cmd_plan(args) -> None:
 
 
 def cmd_execute(args) -> None:
-    """开盘执行最近一份计划(对应文章 9:30 实际交易;虚盘/实盘共用)。
+    """开盘执行最近一份计划(虚盘/实盘共用)。
 
     拉取今日开盘价(tushare rt_k),校验限价单可成交后调 execute_plan 落账。
     整批执行或整批放弃:任一限价单开盘未成交则本次不动,稍后重跑即可
@@ -385,7 +385,7 @@ def main() -> None:
 
     p_bt = sub.add_parser("backtest", help="运行回测")
     p_bt.add_argument("--preset", choices=list(PRESETS), default="original",
-                      help="参数预设:original=忠实原文(默认,年化42%%/回撤-32%%);"
+                      help="参数预设:original=基础版(默认,年化42%%/回撤-32%%);"
                            "v3.1=当前推荐(溢价入场门槛,年化30%%/回撤-13%%);v3/v2=历史版本")
     _add_param_args(p_bt)
 
@@ -394,7 +394,7 @@ def main() -> None:
 
     p_plan = sub.add_parser("plan", help="生成今日交易计划(盘前)")
     p_plan.add_argument("--preset", choices=list(PRESETS), default="v3.1",
-                        help="参数预设:v3.1=当前推荐(V3+溢价过滤,默认),original=忠实原文")
+                        help="参数预设:v3.1=当前推荐(V3+溢价过滤,默认),original=基础版")
     _add_param_args(p_plan)
 
     sub.add_parser("execute", help="开盘按真实开盘价成交最近一份计划(虚盘)")

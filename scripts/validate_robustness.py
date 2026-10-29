@@ -103,7 +103,7 @@ def main():
                             ("hfq(腾讯)", fetch_universe_tx)):
         adj = adjust[:3]
         data = fetcher(list(UNIVERSE), adj)
-        for name, cfg in [("原文策略", BASELINE), ("推荐方案", RECOMMENDED)]:
+        for name, cfg in [("基础版策略", BASELINE), ("推荐方案", RECOMMENDED)]:
             m = perf_metrics(run_backtest(data, cfg).equity)
             rows.append(row(f"{adjust}/{name}", m))
     show(pd.DataFrame(rows), "检验1 复权方式(qfq 含轻微未来信息,hfq 无)——结论应无实质差异")
@@ -113,7 +113,7 @@ def main():
     # ---- 2. 样本外 walk-forward:样本内选参,样本外验证 ----
     # 用一个小型候选池模拟"当时选参"的过程
     candidates = [
-        ("原文", BASELINE),
+        ("基础版", BASELINE),
         ("top2裸", replace(BASELINE, n_hold=2)),
         ("推荐(trail8)", RECOMMENDED),
         ("trail6", replace(RECOMMENDED, trailing_stop=0.06)),
@@ -151,16 +151,16 @@ def main():
         "cagr": PCT, "max_dd": PCT, "OOS_cagr": PCT, "OOS_dd": PCT,
         "calmar": lambda v: f"{v:.2f}"}))
 
-    # ---- 4. 股票池替换:原文池是作者事后选出的,换同类标的结论是否仍成立 ----
+    # ---- 4. 股票池替换:基础版池是作者事后选出的,换同类标的结论是否仍成立 ----
     pools = {
-        "原文池(红利低波/创业板50/纳指/黄金)": ["512890", "159949", "513100", "518880"],
+        "基础版池(红利低波/创业板50/纳指/黄金)": ["512890", "159949", "513100", "518880"],
         "同类替换(红利/创业板/标普500/黄金)": ["510880", "159915", "513500", "518880"],
         "全新池(沪深300/中证500/国债/黄金)": ["510300", "510500", "511010", "518880"],
     }
     rows = []
     for pname, symbols in pools.items():
         d = fetch_universe_tx(symbols, "qfq")   # 统一腾讯源,池内口径一致
-        for name, cfg in [("原文策略", BASELINE), ("推荐方案", RECOMMENDED)]:
+        for name, cfg in [("基础版策略", BASELINE), ("推荐方案", RECOMMENDED)]:
             m = perf_metrics(run_backtest(d, cfg).equity)
             rows.append(row(f"{pname[:12]}../{name}", m))
     show(pd.DataFrame(rows), "检验4 股票池替换(排除'池子选得好'的幸存者偏差)")
